@@ -1,0 +1,45 @@
+name: sentences-chunker
+
+services:
+  # Define a common base service
+  base-service:
+    build:
+      context: ..
+      dockerfile: docker/dockerfile
+    restart: unless-stopped
+    volumes:
+      - sentences_chunker_logs:/app/logs
+    environment:
+      - TOKENIZERS_PARALLELISM=false
+      - LOG_LEVEL=INFO
+    healthcheck:
+      # Check app health through the FastAPI endpoint
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - chunker-network
+
+  # Define the service for production
+  sentences-chunker:
+    extends:
+      service: base-service
+    image: sentences-chunker:latest
+    container_name: sentences-chunker
+    ports:
+      - "8000:8000"
+
+volumes:
+  sentences_chunker_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../logs
+
+networks:
+  chunker-network:
+    name: chunker-network
+    driver: bridge
