@@ -126,35 +126,45 @@ Returns a JSON object containing:
 ---
 
 #### **`POST /file-chunker/`**
-Chunks a text document into segments based on specified token limits and sentence overlap. Users can choose between newline-based or regex-based sentence splitting.
+Chunks a text document into segments based on specified token limits and sentence overlap using WTPSplit's advanced sentence segmentation.
 
 **Parameters:**
 
 *   `file`: (File, required) The text file to be chunked. Supported formats: `.txt`, `.md`.
-*   `max_chunk_tokens`: (Query, integer, optional, default: 800) Maximum number of tokens per chunk. Must be greater than 0.
-*   `overlap`: (Query, integer, optional, default: 0) Number of sentences to overlap between consecutive chunks. Must be non-negative.
-*   `use_newline_splitting`: (Query, boolean, optional, default: `False`) If `True`, splits text at newline characters. If `False`, uses regex pattern matching for sentence splitting.
+*   `model_name`: (Query, string, optional, default: "sat-12l-sm") The SaT model to use for sentence segmentation. Available models: sat-1l, sat-1l-sm, sat-3l, sat-3l-sm, sat-6l, sat-6l-sm, sat-9l, sat-12l, sat-12l-sm.
+*   `split_threshold`: (Query, float, optional, default: 0.5) Threshold for sentence splitting (confidence for boundaries), between 0.0 and 1.0.
+*   `max_chunk_tokens`: (Query, integer, optional, default: 500) Maximum number of tokens per chunk. Must be greater than 0.
+*   `overlap_sentences`: (Query, integer, optional, default: 1) Number of sentences to overlap between consecutive chunks. Must be 0 or more.
+*   `strict_mode`: (Query, boolean, optional, default: `False`) If `True`, returns an error if any chunk cannot strictly adhere to token/overlap limits.
 
 **Response:**
-Returns a `ChunkingResult` JSON object containing:
-*   `chunks`: An array of `Chunk` objects, each with `text`, `token_count`, and `id`.
-*   `metadata`: A `ChunkingMetadata` object with statistics about the chunking process, including original filename, chunk count, token statistics for chunks, the `max_chunk_tokens` setting used, overlap setting, and processing time.
+Returns a `FileChunkingResult` JSON object containing:
+*   `chunks`: An array of `Chunk` objects, each with:
+    - `text`: The combined text of all sentences in the chunk
+    - `token_count`: Total tokens in the chunk
+    - `id`: Sequential chunk identifier
+    - `overflow_details`: (Only present in non-strict mode) Information about why limits were exceeded
+*   `metadata`: A `FileChunkingMetadata` object with comprehensive statistics including:
+    - File information and processing time
+    - Input sentence statistics (count, token distribution)
+    - Output chunk statistics (count, token distribution)
+    - Configuration used (model, split threshold, token limit, overlap)
 
 ---
 
-#### **`POST /adaptive-file-chunking/`**
-Chunks a text document using the *minimum required* token limit necessary to successfully segment the text with a specified sentence overlap. This approach aims for the densest possible chunks. Users can choose between newline-based or regex-based sentence splitting.
+#### **`POST /split-sentences/`**
+Splits a text file into sentences using WTPSplit's advanced sentence segmentation without chunking.
 
 **Parameters:**
 
-*   `file`: (File, required) The text file to be chunked. Supported formats: `.txt`, `.md`.
-*   `overlap`: (Query, integer, required) Number of sentences to overlap between consecutive chunks. Must be between 1 and 3 (inclusive).
-*   `use_newline_splitting`: (Query, boolean, optional, default: `False`) If `True`, splits text at newline characters. If `False`, uses regex pattern matching for sentence splitting.
+*   `file`: (File, required) The text file to split into sentences. Supported formats: `.txt`, `.md`.
+*   `model_name`: (Query, string, optional, default: "sat-12l-sm") The SaT model to use for sentence segmentation.
+*   `split_threshold`: (Query, float, optional, default: 0.5) Threshold value for sentence splitting (confidence score for sentence boundaries), between 0.0 and 1.0.
 
 **Response:**
 Returns a `ChunkingResult` JSON object containing:
-*   `chunks`: An array of `Chunk` objects, each with `text`, `token_count`, and `id`.
-*   `metadata`: A `ChunkingMetadata` object with statistics about the chunking process. The `max_chunk_tokens` field in the metadata will reflect the adaptively determined minimum token limit.
+*   `chunks`: An array of `Chunk` objects, each representing a single sentence with `text`, `token_count`, and `id`.
+*   `metadata`: A `ChunkingMetadata` object with statistics about the sentence splitting process.
 
 ---
 
@@ -165,30 +175,37 @@ Returns a `ChunkingResult` JSON object containing:
 curl http://localhost:8000/
 ```
 
-**Basic usage for /file-chunker/ (uses defaults for overlap and use_newline_splitting)**
+**Basic usage for /file-chunker/ (uses default parameters)**
 ```bash
-curl -X POST "http://localhost:8000/file-chunker/?max_chunk_tokens=500" \
+curl -X POST "http://localhost:8000/file-chunker/" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 ```
 
 **With all parameters specified for /file-chunker/**
 ```bash
-curl -X POST "http://localhost:8000/file-chunker/?max_chunk_tokens=500&overlap=1&use_newline_splitting=true" \
+curl -X POST "http://localhost:8000/file-chunker/\
+  ?max_chunk_tokens=1000\
+  &overlap_sentences=2\
+  &model_name=sat-6l-sm\
+  &split_threshold=0.6\
+  &strict_mode=true" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 ```
 
-**Basic usage for /adaptive-file-chunking/ (uses default for use_newline_splitting)**
+**Basic usage for /split-sentences/**
 ```bash
-curl -X POST "http://localhost:8000/adaptive-file-chunking/?overlap=2" \
+curl -X POST "http://localhost:8000/split-sentences/" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 ```
 
-**With all parameters specified for /adaptive-file-chunking/**
+**With all parameters specified for /split-sentences/**
 ```bash
-curl -X POST "http://localhost:8000/adaptive-file-chunking/?overlap=2&use_newline_splitting=false" \
+curl -X POST "http://localhost:8000/split-sentences/\
+  ?model_name=sat-3l\
+  &split_threshold=0.7" \
   -F "file=@document.txt" \
   -H "accept: application/json"
 ```

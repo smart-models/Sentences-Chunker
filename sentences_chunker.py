@@ -1,111 +1,328 @@
 import re
 import time
-import asyncio
 import logging
 import tiktoken
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import List, Dict, Any
-from logging.handlers import RotatingFileHandler
+import threading
+import torch
+import math
+from enum import Enum
+from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
-from pydantic import BaseModel
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
+
+
+# Define supported SaT models
+class SaTModelName(str, Enum):
+    # 1-layer models
+    sat_1l = "sat-1l"
+    sat_1l_sm = "sat-1l-sm"
+
+    # 3-layer models (good for speed-sensitive applications)
+    sat_3l = "sat-3l"
+    sat_3l_sm = "sat-3l-sm"
+
+    # 6-layer models
+    sat_6l = "sat-6l"
+    sat_6l_sm = "sat-6l-sm"
+
+    # 9-layer model
+    sat_9l = "sat-9l"
+
+    # 12-layer models (best performance)
+    sat_12l = "sat-12l"
+    sat_12l_sm = "sat-12l-sm"  # Default model in original code
 
 
 # Configure logging
-logs_dir = Path("logs")
-logs_dir.mkdir(exist_ok=True)
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-# Get the logger
 logger = logging.getLogger(__name__)
 
-# Create a file handler for error logs
-error_log_path = logs_dir / "errors.log"
-file_handler = RotatingFileHandler(
-    error_log_path,
-    maxBytes=10485760,  # 10 MB
-    backupCount=5,  # Keep 5 backup logs
-    encoding="utf-8",
-)
+# Configuration Constants
+DEFAULT_SAT_MODEL_NAME = SaTModelName.sat_12l_sm
+DEFAULT_SAT_SPLIT_THRESHOLD = 0.5
+TIKTOKEN_ENCODING = "cl100k_base"
+CACHE_TIMEOUT = 3600  # Model cache timeout in seconds (1 hour)
+SUGGESTION_SAFETY_MARGIN_PERCENT = 0.30  # 30% safety margin for suggestions
 
-# Set the file handler to only log errors and critical messages
-file_handler.setLevel(logging.ERROR)
 
-# Create a formatter
-formatter = logging.Formatter(
-    "%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s"
-)
-file_handler.setFormatter(formatter)
+# Custom exception for strict mode chunking
+class StrictChunkingError(ValueError):
+    """Custom exception for errors during strict mode chunking.
 
-# Add the file handler to the logger
-logger.addHandler(file_handler)
+    This exception is raised when strict mode is enabled and chunking limits cannot be respected.
+    It includes detailed information about the failure and suggestions for parameters to resolve the issue.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        details: Dict[str, Any] = None,
+        suggestions: Dict[str, Any] = None,
+    ):
+        super().__init__(message)
+        self.details = details if details is not None else {}
+        self.suggestions = suggestions if suggestions is not None else {}
 
 
 # Pydantic models for response
 class Chunk(BaseModel):
-    """Represents a single text chunk with its token count and ID."""
+    """Represents a single text chunk with its token count and ID.
 
-    text: str
-    token_count: int
-    id: int
+    A chunk is a piece of text that has been created by grouping one or more sentences
+    while respecting token limits. In non-strict mode, a chunk might exceed the configured
+    token limit, in which case it will include overflow_details explaining why.
+    """
+
+    text: str = Field(..., description="The actual text content of the chunk.")
+    token_count: int = Field(..., description="Number of tokens in the chunk.")
+    id: int = Field(..., description="Sequential ID of the chunk.")
+    overflow_details: Optional[str] = Field(
+        None,
+        description="Details if the chunk exceeded configured limits but was processed in non-strict mode.",
+    )
 
 
 class ChunkingMetadata(BaseModel):
-    """Metadata about the chunking process and results."""
+    """Metadata about the sentence splitting process and results."""
 
-    file: str
-    n_chunks: int
-    avg_tokens: int
-    max_tokens: int
-    min_tokens: int
-    max_chunk_tokens: int
-    overlap: int
-    processing_time: float
+    file: str = Field(..., description="Name of the processed file.")
+    n_sentences: int = Field(..., description="Total number of sentences generated.")
+    avg_tokens_per_sentence: int = Field(
+        ..., description="Average number of tokens per sentence."
+    )
+    max_tokens_in_sentence: int = Field(
+        ..., description="Maximum number of tokens in any single sentence."
+    )
+    min_tokens_in_sentence: int = Field(
+        ..., description="Minimum number of tokens in any single sentence."
+    )
+    processing_time: float = Field(
+        ..., description="Total time taken for processing in seconds."
+    )
+    sat_model_name: SaTModelName = Field(
+        ..., description="Name of the SaT model used for splitting."
+    )
+    split_threshold: float = Field(
+        ..., description="Threshold used for sentence splitting."
+    )
+
+
+class FileChunkingMetadata(BaseModel):
+    """Metadata about the file chunking process and results."""
+
+    # Fields ordered to match the instance creation order at lines 1003-1018
+    file: str = Field(..., description="Name of the processed file.")
+    configured_max_chunk_tokens: int = Field(
+        ..., description="Maximum token limit per chunk for token chunker."
+    )
+    configured_overlap_sentences: int = Field(
+        ..., description="Number of overlapping sentences between chunks."
+    )
+    n_input_sentences: int = Field(
+        ..., description="Number of sentences before chunking."
+    )
+    avg_tokens_per_input_sentence: int = Field(
+        ..., description="Average tokens per sentence before chunking."
+    )
+    max_tokens_in_input_sentence: int = Field(
+        ..., description="Max tokens in a sentence before chunking."
+    )
+    min_tokens_in_input_sentence: int = Field(
+        ..., description="Min tokens in a sentence before chunking."
+    )
+    n_chunks: int = Field(..., description="Total number of chunks generated.")
+    avg_tokens_per_chunk: int = Field(..., description="Average tokens per chunk.")
+    max_tokens_in_chunk: int = Field(..., description="Maximum tokens in any chunk.")
+    min_tokens_in_chunk: int = Field(..., description="Minimum tokens in any chunk.")
+    sat_model_name: SaTModelName = Field(
+        ..., description="Name of the SaT model used for splitting."
+    )
+    split_threshold: float = Field(
+        ..., description="Threshold used for sentence splitting."
+    )
+    processing_time: float = Field(
+        ..., description="Total time taken for processing in seconds."
+    )
+
+    class Config:
+        use_enum_values = True
 
 
 class ChunkingResult(BaseModel):
-    """Complete result of the chunking process."""
+    """Results from the sentence splitting operation."""
 
-    chunks: List[Chunk]
-    metadata: ChunkingMetadata
+    chunks: List[Chunk] = Field(..., description="List of generated sentences.")
+    metadata: ChunkingMetadata = Field(
+        ..., description="Metadata about the sentence splitting process."
+    )
+
+
+class FileChunkingResult(BaseModel):
+    """Results from the file chunking operation."""
+
+    chunks: List[Chunk] = Field(..., description="List of generated chunks.")
+    metadata: FileChunkingMetadata = Field(
+        ..., description="Metadata about the file chunking process."
+    )
+
+
+# Create a singleton for model caching with expiration
+_model_cache = {}
+_model_last_used = {}
+_model_lock = threading.RLock()  # Thread-safe lock for model cache
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
     logger.info("Starting Text Chunker API...")
-    # Any initialization can go here (e.g., loading models)
+
+    # Initialize the SaT model during startup
+    try:
+        logger.info(
+            f"Loading WTPSplit model {DEFAULT_SAT_MODEL_NAME.value} during application startup..."
+        )
+        _get_sat_model(DEFAULT_SAT_MODEL_NAME)
+        logger.info("WTPSplit model loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load WTPSplit model: {str(e)}")
+
     yield
+
     # Cleanup code
     logger.info("Shutting down Text Chunker API...")
+    try:
+        # Cleanup model cache
+        with _model_lock:
+            for model_name in list(_model_cache.keys()):
+                if model_name in _model_cache:
+                    del _model_cache[model_name]
+                    logger.info(f"Removed model {model_name} from cache")
+
+        # Cleanup GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("GPU memory cleared during shutdown")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
 
 
+# Initialize FastAPI app
 app = FastAPI(
     title="Text Chunker API",
     description="API for chunking text documents into smaller segments with control over token count and overlap",
-    version="0.5.0",  # Incremented version number for the new functionality
+    version="0.6.0",
     lifespan=lifespan,
 )
 
 
-def split_sentences_at_newline(doc: str) -> List[str]:
-    """Split a document into sentences using newline characters (LF).
+def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
+    """Get or initialize the SaT model with in-memory caching.
 
-    This is a simple splitting method that treats each line as a separate sentence.
-    It splits the text at newline characters and returns each line as a sentence.
+    Args:
+        model_name (SaTModelName): Name of the SaT model to use
+
+    Returns:
+        SaT: The initialized SaT model instance.
+
+    Raises:
+        ImportError: If WTPSplit is not installed
+        RuntimeError: If there's an error initializing the model
+    """
+    current_time = time.time()
+    model_key = model_name.value  # Using the model name as the cache key
+
+    with _model_lock:
+        # Check for expired models first
+        expired_models = [
+            name
+            for name, last_used in _model_last_used.items()
+            if current_time - last_used > CACHE_TIMEOUT
+        ]
+
+        # Remove expired models
+        for name in expired_models:
+            if (
+                name in _model_cache and name != model_key
+            ):  # Don't remove the one we're about to use
+                logger.info(f"Removing expired model {name} from cache")
+                del _model_cache[name]
+                del _model_last_used[name]
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        # Update or load the requested model
+        if model_key not in _model_cache:
+            try:
+                # Lazy import to avoid loading the model until needed
+                from wtpsplit import SaT
+
+                # Initialize model (will download if needed)
+                logger.info(f"Initializing WTPSplit model {model_key}")
+                _model_cache[model_key] = SaT(model_key)
+
+                # Use GPU if available for better performance
+                if torch.cuda.is_available():
+                    _model_cache[model_key].half().to("cuda")
+                    logger.info("SaT model initialized on GPU")
+                else:
+                    logger.info("SaT model initialized on CPU")
+
+            except ImportError:
+                error_msg = "WTPSplit is not installed. Please install it with: pip install wtpsplit"
+                logger.error(error_msg)
+                raise ImportError(error_msg)
+            except Exception as e:
+                error_msg = f"Error initializing SaT model: {str(e)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg) from e
+
+        # Update last used timestamp
+        _model_last_used[model_key] = current_time
+
+        return _model_cache[model_key]
+
+
+def preprocess_text(text):
+    """Replace single line breaks with spaces while preserving paragraph breaks.
+
+    Args:
+        text (str): Input text to preprocess
+
+    Returns:
+        str: Text with single line breaks replaced by spaces
+    """
+    # Replace single line breaks with spaces
+    # Only preserves paragraph breaks (double line breaks)
+    return re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+
+
+def split_sentences_NLP(
+    doc: str,
+    model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME,
+    split_threshold: float = DEFAULT_SAT_SPLIT_THRESHOLD,
+) -> List[str]:
+    """Split a document into sentences using WTPSplit's advanced sentence segmentation.
+
+    This function uses the Segment any Text (SaT) model from WTPSplit to intelligently
+    split text into sentences, handling various edge cases and multiple languages.
+    The model is loaded only once and reused for better performance.
 
     Args:
         doc (str): The input document text to be split into sentences.
+        model_name (SaTModelName): Name of the SaT model to use
+        split_threshold (float): Threshold value for sentence splitting (0.0-1.0)
 
     Returns:
         List[str]: A list of sentences, with each sentence stripped of leading/trailing whitespace.
 
     Raises:
-        ValueError: If doc is None or not a string
-        RuntimeError: If there's an error while processing the document
+        ValueError: If doc is None or not a string or if split_threshold is not between 0 and 1
+        RuntimeError: If there's an error while processing the document or initializing the model
     """
     # Input validation
     if doc is None:
@@ -118,157 +335,133 @@ def split_sentences_at_newline(doc: str) -> List[str]:
 
     # Handle empty string case
     if not doc.strip():
-        logging.warning("Empty document provided to split_sentences_at_newline")
+        logging.warning("Empty document provided to split_sentences_NLP")
         return []
 
     try:
-        # Split the document at newline characters
-        lines = doc.split("\n")
+        # Validate split_threshold
+        if not 0.0 <= split_threshold <= 1.0:
+            raise ValueError(
+                f"split_threshold must be between 0.0 and 1.0, got {split_threshold}"
+            )
 
-        # Strip whitespace from each line and filter out empty lines
-        sentences = [line.strip() for line in lines if line.strip()]
+        # Get the cached model instance
+        sat = _get_sat_model(model_name)
 
-        return sentences
+        # Split the document into sentences
+        sentences = sat.split(doc, threshold=split_threshold)
+
+        # Filter out any empty strings that might result from the split
+        return [s.strip() for s in sentences if s.strip()]
+
+    except ImportError as e:
+        # Already logged in get_sat_model
+        raise e
     except Exception as e:
-        logging.error(f"Unexpected error in split_sentences_at_newline: {str(e)}")
-        raise RuntimeError(f"Error processing document: {str(e)}")
+        error_msg = f"Error in WTPSplit sentence segmentation: {str(e)}"
+        logging.error(error_msg)
+        raise RuntimeError(error_msg) from e
 
 
-def split_into_sentences(doc: str) -> List[str]:
-    """Split a document into sentences using regex pattern matching.
+def _round_up_to_nearest_multiple(number: float, multiple: int) -> int:
+    """
+    Round a number up to the nearest multiple of a given value.
 
     Args:
-        doc (str): The input document text to be split into sentences.
+        number (float): The number to round up.
+        multiple (int): The multiple to round up to. If zero, simply rounds up to the next integer.
 
     Returns:
-        List[str]: A list of sentences, with each sentence stripped of leading/trailing whitespace.
-
-    Note:
-        The function handles common edge cases like:
-        - Titles (Mr., Mrs., Dr., etc.)
-        - Common abbreviations (i.e., e.g., etc.)
-        - Decimal numbers
-        - Ellipsis
-        - Quotes and brackets
-
-    Raises:
-        ValueError: If doc is None or not a string
-        RuntimeError: If regex pattern matching fails
+        int: The number rounded up to the nearest multiple of the given value.
     """
-    # Input validation
-    if doc is None:
-        logging.error("Input document is None")
-        raise ValueError("Input document cannot be None")
-
-    if not isinstance(doc, str):
-        logging.error(f"Input document must be a string, got {type(doc)}")
-        raise ValueError(f"Input document must be a string, got {type(doc)}")
-
-    # Handle empty string case
-    if not doc.strip():
-        logging.warning("Empty document provided to split_into_sentences")
-        return []
-
-    # Define a pattern that looks for sentence boundaries but doesn't include them in the split
-    # Instead of splitting directly at punctuation, we'll look for patterns that indicate sentence endings
-    pattern = r"""
-        # Match sentence ending punctuation followed by space and capital letter
-        # Negative lookbehind for titles, abbreviations, initials, numbers, etc.
-        (?<![A-Z][a-z]\.)          # Avoid splitting abbreviations like U.S.A.
-        (?<!\s[A-Z]\.)             # Avoid splitting single initials like D. in Christopher D. Manning
-        (?<!Mr\.)(?<!Mrs\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ms\.) # Avoid splitting titles
-        (?<!i\.e\.)(?<!e\.g\.)(?<!vs\.)(?<!etc\.)(?<!et al\.)             # Avoid splitting common abbreviations
-        (?<!\d\.)(?<!\.\d)         # Avoid splitting decimal numbers or numbered lists
-        (?<!\.\.\..)                # Avoid splitting ellipsis
-        [\.!?]                    # Match sentence ending punctuation (. ! ?)
-        \s+                        # Match one or more whitespace characters
-        (?=[A-Z])                  # Positive lookahead for a capital letter (start of the next sentence)
-    """
-
-    try:
-        # Find all positions where we should split
-        split_positions = []
-        for match in re.finditer(pattern, doc, re.VERBOSE):
-            # Split after the punctuation and space
-            split_positions.append(match.end())
-
-        # Use the positions to extract sentences
-        sentences = []
-        start = 0
-        for pos in split_positions:
-            if pos > start:
-                sentences.append(doc[start:pos].strip())
-                start = pos
-
-        # Add the last sentence if there's remaining text
-        if start < len(doc):
-            sentences.append(doc[start:].strip())
-
-        # Filter out empty sentences
-        return [s for s in sentences if s]
-    except re.error as e:
-        logging.error(f"Regex pattern error in split_into_sentences: {str(e)}")
-        raise RuntimeError(f"Failed to parse document with regex: {str(e)}")
-    except Exception as e:
-        logging.error(f"Unexpected error in split_into_sentences: {str(e)}")
-        raise RuntimeError(f"Error processing document: {str(e)}")
+    if multiple == 0:
+        return math.ceil(number)
+    return math.ceil(number / multiple) * multiple
 
 
-def count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+def count_tokens(text: str, encoding_name: str = TIKTOKEN_ENCODING) -> int:
     """Count tokens in a text string using the specified encoding.
 
+    This function uses the tiktoken library to count tokens according to the specified encoding.
+    By default, it uses the 'cl100k_base' encoding which is compatible with many recent
+    large language models. Token count is important for determining how text will be
+    processed by models with token limits.
+
     Args:
-        text (str): Text to count tokens for
-        encoding_name (str): Name of the tiktoken encoding to use (default: cl100k_base)
+        text: Text string to count tokens for
+        encoding_name: Name of the tiktoken encoding to use (default: 'cl100k_base')
 
     Returns:
         int: Number of tokens in the text
 
     Raises:
-        ValueError: If the encoding name is invalid or not supported
-        RuntimeError: If there's an issue with tokenization
+        ValueError: If the specified encoding is not found in tiktoken
+        RuntimeError: For other encoding or processing errors
     """
+    if not text:
+        return 0
+
     try:
-        if not text:
-            return 0
-
+        # Get the encoding for the specified model
         encoding = tiktoken.get_encoding(encoding_name)
-        return len(encoding.encode(text))
+
+        # Encode the text and count the tokens
+        tokens = encoding.encode(text)
+        return len(tokens)
+
     except KeyError:
-        logging.error(f"Invalid encoding name: {encoding_name}")
-        raise ValueError(f"Invalid or unsupported encoding name: '{encoding_name}'")
+        error_msg = f"Encoding '{encoding_name}' not found in tiktoken"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
     except Exception as e:
-        logging.error(f"Error during token counting: {str(e)}")
-        raise RuntimeError(f"Failed to count tokens: {str(e)}")
+        error_msg = f"Error counting tokens: {str(e)}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
 
 
-def chunk_by_token_limit(
-    sentence_data: List[Dict[str, Any]], max_chunk_tokens: int = 800, overlap: int = 0
+async def _chunk_sentences_by_token_limit(
+    sentences_data: List[Dict[str, Any]],
+    max_chunk_tokens: int,
+    configured_overlap_sentences: int,  # Renamed for clarity within this function
+    strict_mode: bool = False,
 ) -> List[Dict[str, Any]]:
-    """
-    Groups sentences into chunks not exceeding the max token limit, with optional sentence overlap.
+    """Groups sentences into chunks based on token limits with optional overlap.
 
-    Sentences are processed in order (from first to last) and concatenated until
-    adding another sentence would exceed the token limit. Then a new chunk is started.
-    Each chunk (except the first) can start with the last 'overlap' sentences from the previous chunk.
+    This function takes a list of sentences with their token counts and groups them into
+    larger chunks while respecting a maximum token limit. It can also create overlapping
+    chunks by repeating a specified number of sentences between consecutive chunks.
+
+    In strict mode, if any limit cannot be respected (e.g., a single sentence exceeds the
+    token limit or the configured overlap would exceed the token limit), the function raises
+    a StrictChunkingError with detailed suggestions for parameter adjustments.
 
     Args:
-        sentence_data (list of dict): Each dict has 'text', 'token_count', 'id' keys.
-        max_chunk_tokens (int): Maximum number of tokens per chunk.
-        overlap (int): Number of sentences to overlap between consecutive chunks.
+        sentences_data: List of dicts with 'text', 'token_count', and 'id' for each sentence
+        max_chunk_tokens: Maximum tokens allowed per chunk
+        configured_overlap_sentences: Number of sentences to overlap between chunks (0, 1, 2, or 3).
+                                      Setting to 0 disables overlap.
+        strict_mode: If True, raises StrictChunkingError when limits cannot be respected.
+                     If False, creates oversized chunks with warning details.
 
     Returns:
-        list of dict: Each dict has 'text', 'token_count', and 'sentence_ids' keys.
+        List of dicts with:
+            - 'text': The combined text of all sentences in the chunk
+            - 'token_count': Total tokens in the chunk
+            - 'id': Sequential chunk identifier
+            - 'original_sentence_ids': List of sentence IDs included in this chunk
+            - 'overflow_details': (Only in non-strict mode) Information about why limits were exceeded
 
     Raises:
-        ValueError: If parameters are invalid or overlap is too large
+        ValueError: If parameters are invalid (e.g., negative max_chunk_tokens)
         TypeError: If input types are incorrect
+        StrictChunkingError: When in strict mode and chunking limits cannot be respected.
+                            Contains suggestions for parameter adjustments.
         RuntimeError: For other processing errors
     """
     # Validate input types
-    if not isinstance(sentence_data, list):
-        logging.error(f"sentence_data must be a list, got {type(sentence_data)}")
-        raise TypeError(f"sentence_data must be a list, got {type(sentence_data)}")
+    if not isinstance(sentences_data, list):
+        logging.error(f"sentences_data must be a list, got {type(sentences_data)}")
+        raise TypeError(f"sentences_data must be a list, got {type(sentences_data)}")
 
     if not isinstance(max_chunk_tokens, int):
         logging.error(
@@ -278,27 +471,35 @@ def chunk_by_token_limit(
             f"max_chunk_tokens must be an integer, got {type(max_chunk_tokens)}"
         )
 
-    if not isinstance(overlap, int):
-        logging.error(f"overlap must be an integer, got {type(overlap)}")
-        raise TypeError(f"overlap must be an integer, got {type(overlap)}")
+    if not isinstance(configured_overlap_sentences, int):
+        logging.error(
+            f"configured_overlap_sentences must be an integer, got {type(configured_overlap_sentences)}"
+        )
+        raise TypeError(
+            f"configured_overlap_sentences must be an integer, got {type(configured_overlap_sentences)}"
+        )
 
     # Validate parameter values
     if max_chunk_tokens <= 0:
         logging.error(f"max_chunk_tokens must be positive, got {max_chunk_tokens}")
         raise ValueError(f"max_chunk_tokens must be positive, got {max_chunk_tokens}")
 
-    if overlap < 0:
-        logging.error(f"overlap must be non-negative, got {overlap}")
-        raise ValueError("Overlap must be non-negative.")
+    if configured_overlap_sentences < 0:
+        logging.error(
+            f"configured_overlap_sentences must be non-negative, got {configured_overlap_sentences}"
+        )
+        raise ValueError("configured_overlap_sentences must be non-negative.")
 
-    # Validate sentence_data contents
-    if not sentence_data:
-        logging.warning("Empty sentence_data provided to chunk_by_token_limit")
+    # Validate sentences_data contents
+    if not sentences_data:
+        logging.warning(
+            "Empty sentences_data provided to _chunk_sentences_by_token_limit"
+        )
         return []
 
     try:
         # Validate each sentence item has the required keys
-        for i, item in enumerate(sentence_data):
+        for i, item in enumerate(sentences_data):
             if not isinstance(item, dict):
                 raise TypeError(
                     f"Item at index {i} must be a dictionary, got {type(item)}"
@@ -314,694 +515,611 @@ def chunk_by_token_limit(
                 )
 
         chunks = []
-        n = len(sentence_data)
-        start_idx = 0
+        current_chunk_sentences = []
+        current_chunk_tokens = 0
+        chunk_id_counter = 1
+        # Flag to track if the current chunk being formed started with an oversized overlap
+        current_chunk_overflow_reason_from_overlap = None
 
-        while start_idx < n:
-            current_chunk = []
-            current_tokens = 0
-            current_ids = []
+        for i, sentence in enumerate(sentences_data):
+            # Determine if we need to include overflow details for the current chunk
+            pending_overflow_details_for_chunk = (
+                current_chunk_overflow_reason_from_overlap
+            )
 
-            # Determine the starting index for this chunk (accounting for overlap)
-            # For the first chunk, overlap is ignored
-            if chunks:
-                overlap_start = max(0, start_idx - overlap)
-                overlap_sentences = sentence_data[overlap_start:start_idx]
-                overlap_tokens = sum(item["token_count"] for item in overlap_sentences)
-                if overlap_tokens > max_chunk_tokens:
-                    raise ValueError(
-                        f"Overlap too large: overlapping sentences alone ({overlap_tokens} tokens) exceed max_chunk_tokens ({max_chunk_tokens})"
-                    )
-                for item in overlap_sentences:
-                    current_chunk.append(item["text"])
-                    current_tokens += item["token_count"]
-                    current_ids.append(item["id"])
-
-            # Fill the chunk up to the token limit (do not re-add overlap sentences)
-            idx = start_idx
-            while (
-                idx < n
-                and current_tokens + sentence_data[idx]["token_count"]
-                <= max_chunk_tokens
+            # If adding this sentence would exceed the limit and we have something in the current chunk
+            if current_chunk_sentences and (
+                current_chunk_tokens + sentence["token_count"] > max_chunk_tokens
             ):
-                current_chunk.append(sentence_data[idx]["text"])
-                current_tokens += sentence_data[idx]["token_count"]
-                current_ids.append(sentence_data[idx]["id"])
-                idx += 1
+                # Finalize current chunk
+                chunk_text = " ".join(s["text"] for s in current_chunk_sentences)
+                chunk_to_add = {
+                    "text": chunk_text,
+                    "token_count": current_chunk_tokens,
+                    "id": chunk_id_counter,
+                    "original_sentence_ids": [s["id"] for s in current_chunk_sentences],
+                }
+                if pending_overflow_details_for_chunk and not strict_mode:
+                    chunk_to_add["overflow_details"] = (
+                        pending_overflow_details_for_chunk
+                    )
 
-            if current_chunk:
-                chunks.append(
-                    {
-                        "text": " ".join(current_chunk),
-                        "token_count": current_tokens,
-                        "sentence_ids": current_ids,
+                chunks.append(chunk_to_add)
+                chunk_id_counter += 1
+                current_chunk_overflow_reason_from_overlap = (
+                    None  # Reset after using it
+                )
+
+                # Start new chunk with overlap
+                if configured_overlap_sentences > 0 and current_chunk_sentences:
+                    # Take last N sentences from previous chunk as overlap
+                    overlap_start_index = max(
+                        0, len(current_chunk_sentences) - configured_overlap_sentences
+                    )
+                    overlap_data = current_chunk_sentences[overlap_start_index:]
+                    overlap_tokens_count = sum(s["token_count"] for s in overlap_data)
+
+                    if overlap_tokens_count > max_chunk_tokens:
+                        reason = (
+                            f"Overlap of {len(overlap_data)} sentences ({overlap_tokens_count} tokens) "
+                            f"exceeds max_chunk_tokens ({max_chunk_tokens})."
+                        )
+                        if strict_mode:
+                            # STEP 1: Calculate suggested max_chunk_tokens value for this overlap scenario
+                            # Start with the actual number of tokens in the overlap that failed
+                            base_required_tokens_for_overlap = overlap_tokens_count
+
+                            # Apply safety margin (e.g., 30%) to ensure the suggested value is robust
+                            # This prevents suggesting a value that's just barely enough
+                            tokens_for_overlap_with_margin = (
+                                base_required_tokens_for_overlap
+                                * (1 + SUGGESTION_SAFETY_MARGIN_PERCENT)
+                            )
+
+                            # Round up to nearest multiple of 100 for a cleaner, more user-friendly suggestion
+                            # E.g., 523 tokens with margin becomes 600 rather than 523
+                            suggested_max_t_for_overlap = _round_up_to_nearest_multiple(
+                                tokens_for_overlap_with_margin, 100
+                            )
+
+                            # STEP 2: Calculate suggested overlap_sentences value
+                            # Initialize with None - this will be updated if we find a viable value
+                            suggested_overlap_s_val = None
+
+                            # Get number of sentences in the current chunk - these are the sentences
+                            # from which we'll try to create a smaller overlap
+                            num_sentences_in_prev = len(current_chunk_sentences)
+
+                            # Determine the maximum overlap we need to test
+                            # We can't overlap more sentences than what the user configured or what's available
+                            max_possible_overlap_to_test = min(
+                                num_sentences_in_prev,  # Can't overlap more than we have
+                                configured_overlap_sentences,  # Can't overlap more than configured
+                            )
+
+                            # Algorithm: Work backwards through overlap sizes to find maximum viable overlap
+                            # Start at 0 (no viable overlap found yet)
+                            max_allowable_s_for_current_max_t = 0
+
+                            # Test each possible overlap size from 1 to max possible
+                            for k_s in range(1, max_possible_overlap_to_test + 1):
+                                # Calculate starting index for taking last k_s sentences
+                                start_idx_k = num_sentences_in_prev - k_s
+
+                                # Extract the subset of sentences for this overlap size
+                                temp_overlap_k_subset = current_chunk_sentences[
+                                    start_idx_k:
+                                ]
+
+                                # Count total tokens in this potential overlap
+                                tokens_k = sum(
+                                    s["token_count"] for s in temp_overlap_k_subset
+                                )
+
+                                # If this overlap fits within current max_chunk_tokens, it's viable
+                                if tokens_k <= max_chunk_tokens:
+                                    max_allowable_s_for_current_max_t = (
+                                        k_s  # Update maximum viable overlap
+                                    )
+                                else:
+                                    break  # Stop testing larger overlaps once we find one that's too large
+
+                            # STEP 3: Determine what overlap value to suggest based on our analysis
+                            # Case 1: If we found a viable overlap smaller than what failed, suggest that value
+                            if max_allowable_s_for_current_max_t < len(overlap_data):
+                                suggested_overlap_s_val = (
+                                    max_allowable_s_for_current_max_t
+                                )
+                            # Case 2: If even 1 sentence overlap would be too much, suggest disabling overlap (0)
+                            elif (
+                                max_allowable_s_for_current_max_t == 0
+                                and len(overlap_data) > 0
+                            ):
+                                suggested_overlap_s_val = 0
+                            # Note: In other cases, suggested_overlap_s_val remains None
+
+                            # STEP 4: Create a detailed, user-friendly message with options
+                            # Format a message giving the user multiple options to resolve the issue
+                            msg_overlap = (
+                                f"Current settings (max_tokens: {max_chunk_tokens}, overlap: {len(overlap_data)}) are too restrictive for overlap. "
+                                f"Consider these options:\n"
+                                # Option 1: Always suggest increasing max_chunk_tokens as the primary solution
+                                f"1. Increase 'max_chunk_tokens' to around {suggested_max_t_for_overlap}. This may allow your original 'overlap_sentences' or a higher value.\n"
+                            )
+                            # Option 2a: If we found a viable smaller overlap, suggest that specific value
+                            if suggested_overlap_s_val is not None:
+                                msg_overlap += f"2. With your current 'max_chunk_tokens' ({max_chunk_tokens}), try setting 'overlap_sentences' to {suggested_overlap_s_val}.\n"
+                            # Option 2b: If no viable overlap was found, suggest a more general approach
+                            else:  # If no viable overlap could be calculated
+                                msg_overlap += "2. Alternatively, significantly reduce 'overlap_sentences' (possibly to 0) if you cannot increase 'max_chunk_tokens'.\n"
+                            # Add footer to emphasize these are estimates
+                            msg_overlap += (
+                                "These are initial estimates to help proceed."
+                            )
+
+                            # STEP 5: Package all suggestions into a structured object
+                            suggestions = {
+                                "suggested_max_chunk_tokens": suggested_max_t_for_overlap,
+                                "suggested_overlap_sentences": suggested_overlap_s_val,
+                                "message": msg_overlap,
+                            }
+                            raise StrictChunkingError(
+                                f"Strict mode: {reason}",
+                                details={
+                                    "type": "overlap_too_large",
+                                    "current_overlap_sentences": len(overlap_data),
+                                    "overlap_tokens": overlap_tokens_count,
+                                    "current_max_chunk_tokens": max_chunk_tokens,
+                                },
+                                suggestions=suggestions,
+                            )
+                        else:
+                            current_chunk_overflow_reason_from_overlap = reason
+                            logging.warning(
+                                f"Chunk (to be ID {chunk_id_counter}) will start with oversized overlap: {reason}"
+                            )
+                    current_chunk_sentences = overlap_data
+                    current_chunk_tokens = overlap_tokens_count
+                else:
+                    current_chunk_sentences = []
+                    current_chunk_tokens = 0
+
+            # Add current sentence to chunk
+            current_chunk_sentences.append(sentence)
+            current_chunk_tokens += sentence["token_count"]
+
+            # Handle case where a single sentence exceeds max_chunk_tokens
+            if (
+                len(current_chunk_sentences) == 1
+                and current_chunk_tokens > max_chunk_tokens
+            ):
+                reason = (
+                    f"Single sentence (ID {sentence['id']}) with {sentence['token_count']} tokens "
+                    f"exceeds max_chunk_tokens ({max_chunk_tokens})."
+                )
+                if strict_mode:
+                    # SINGLE SENTENCE CASE: A single sentence exceeds the maximum token limit
+                    # This case is simpler than the overlap case because there's only one solution: increase the token limit
+
+                    # STEP 1: Calculate a suggested max_chunk_tokens value based on this sentence
+                    # Start with the actual token count of the sentence
+                    base_required_tokens = sentence["token_count"]
+
+                    # Apply safety margin (e.g., 30%) to ensure the suggested value works robustly
+                    # This prevents suggesting a value that's just barely enough
+                    tokens_with_margin = base_required_tokens * (
+                        1 + SUGGESTION_SAFETY_MARGIN_PERCENT
+                    )
+
+                    # Round up to nearest multiple of 100 for a cleaner, more user-friendly suggestion
+                    # E.g., 437 tokens with margin becomes 500 rather than 437
+                    suggested_max_t = _round_up_to_nearest_multiple(
+                        tokens_with_margin, 100
+                    )
+
+                    # STEP 2: Package the suggestion with helpful information
+                    suggestions = {
+                        "suggested_max_chunk_tokens": suggested_max_t,
+                        "suggested_overlap_sentences": None,  # Overlap is not relevant in this case
+                        "message": (
+                            f"The current 'max_chunk_tokens' ({max_chunk_tokens}) is too low for at least one sentence. "
+                            f"A more robust 'max_chunk_tokens' to try would be around {suggested_max_t}."
+                        ),
                     }
-                )
+                    raise StrictChunkingError(
+                        f"Strict mode: {reason}",
+                        details={
+                            "type": "single_sentence_too_large",
+                            "sentence_id": sentence["id"],
+                            "sentence_tokens": sentence["token_count"],
+                            "current_max_chunk_tokens": max_chunk_tokens,
+                        },
+                        suggestions=suggestions,
+                    )
+                else:
+                    # NON-STRICT MODE: Process the oversized sentence anyway, with warning details
+                    logging.warning(
+                        f"Creating oversized chunk for single sentence: {reason}"
+                    )
 
-            # Move start_idx forward, but overlap with previous chunk
-            if idx == start_idx:
-                # This means a single sentence is too large to fit even with overlap
-                sentence_tokens = sentence_data[start_idx]["token_count"]
-                raise ValueError(
-                    f"Cannot create chunk: sentence at index {start_idx} has {sentence_tokens} tokens, exceeding max_chunk_tokens ({max_chunk_tokens})"
+                    # Prepare overflow details to include in the chunk
+                    overflow_details_for_single = reason
+
+                    # If this chunk also had a previous overlap issue, note both problems
+                    if current_chunk_overflow_reason_from_overlap:
+                        overflow_details_for_single = f"{reason} (Also started with oversized overlap: {current_chunk_overflow_reason_from_overlap})"
+
+                    # Add the oversized sentence as its own chunk with overflow details
+                    chunks.append(
+                        {
+                            "text": sentence["text"],
+                            "token_count": sentence["token_count"],
+                            "id": chunk_id_counter,
+                            "original_sentence_ids": [sentence["id"]],
+                            "overflow_details": overflow_details_for_single,  # Include details about why this chunk exceeds limits
+                        }
+                    )
+
+                    # Prepare for the next chunk
+                    chunk_id_counter += 1
+                    current_chunk_sentences = []  # Clear the current chunk
+                    current_chunk_tokens = 0
+                    current_chunk_overflow_reason_from_overlap = (
+                        None  # Reset overflow flag since this chunk is handled
+                    )
+
+        # Add any remaining sentences as the final chunk
+        if current_chunk_sentences:
+            chunk_text = " ".join(s["text"] for s in current_chunk_sentences)
+            final_chunk_dict = {
+                "text": chunk_text,
+                "token_count": current_chunk_tokens,
+                "id": chunk_id_counter,
+                "original_sentence_ids": [s["id"] for s in current_chunk_sentences],
+            }
+            if current_chunk_overflow_reason_from_overlap and not strict_mode:
+                final_chunk_dict["overflow_details"] = (
+                    current_chunk_overflow_reason_from_overlap
                 )
-            start_idx = idx
+            chunks.append(final_chunk_dict)
 
         return chunks
+    except StrictChunkingError:
+        # Re-raise StrictChunkingError to be handled by the endpoint
+        raise
     except (ValueError, TypeError) as e:
         # Re-raise these as they carry specific error information
-        logging.error(f"Error in chunk_by_token_limit: {str(e)}")
+        logging.error(f"Error in _chunk_sentences_by_token_limit: {str(e)}")
         raise
     except Exception as e:
-        logging.error(f"Unexpected error in chunk_by_token_limit: {str(e)}")
+        logging.error(f"Unexpected error in _chunk_sentences_by_token_limit: {str(e)}")
         raise RuntimeError(f"Error processing chunks: {str(e)}")
-
-
-async def _find_min_max_tokens(
-    sentence_data: List[Dict[str, Any]], max_sent_tok: int, overlap: int
-) -> int:
-    """
-    Find the minimum token limit required for chunking with the given overlap.
-
-    Uses binary search to find the smallest value of max_chunk_tokens
-    that will successfully chunk the text with the specified overlap.
-
-    Args:
-        sentence_data: List of dicts with sentence info (text, token_count, id)
-        max_sent_tok: Maximum number of tokens in any single sentence
-        overlap: Number of sentences to overlap between chunks
-
-    Returns:
-        int: Minimum value of max_chunk_tokens that works with the given overlap
-    """
-    # Define lower and upper bounds
-    lower_bound = max_sent_tok  # Cannot be less than the largest sentence
-    # Adjust upper bound based on overlap - more generous for higher overlap values
-    estimated_overlap_tokens = overlap * max_sent_tok if sentence_data else 0
-    # Add a safety buffer
-    upper_bound = max(lower_bound, estimated_overlap_tokens) + 250
-
-    # The minimum value we've successfully chunked with - initialized higher
-    min_success = upper_bound + 1
-
-    # Counter to limit iterations
-    iterations = 0
-    max_iterations = 20  # Aumentato per casi più complessi
-
-    logger.debug(
-        f"Starting binary search for overlap {overlap}: range [{lower_bound}, {upper_bound}]"
-    )
-
-    # Binary search to find minimum working value
-    found_success = False
-    while lower_bound <= upper_bound and iterations < max_iterations:
-        iterations += 1
-        mid = (lower_bound + upper_bound) // 2
-
-        if mid == 0:  # Evita di testare con max_tokens=0
-            lower_bound = 1
-            continue
-
-        logger.debug(f"Iteration {iterations}: Testing mid={mid}")
-
-        try:
-            # Try to create chunks with the current mid value
-            # We don't need to store the result, just check if it works without errors
-            # Use asyncio.shield to protect against cancellation during chunking
-            await asyncio.shield(
-                asyncio.to_thread(chunk_by_token_limit, sentence_data, mid, overlap)
-            )
-            # If successful, this could be our answer, but we want the minimum
-            logger.debug(f"Iteration {iterations}: Success with mid={mid}")
-            min_success = mid
-            found_success = True
-            # Check if we can go lower
-            upper_bound = mid - 1
-        except ValueError as e:
-            # If chunking fails, we need a higher value
-            logger.debug(
-                f"Iteration {iterations}: Failed with mid={mid} (ValueError: {e}). Increasing lower bound."
-            )
-            lower_bound = mid + 1
-        except Exception as e:
-            # Catch unexpected errors during the chunking test
-            logger.error(
-                f"Unexpected error during chunking test in _find_min_max_tokens (mid={mid}, overlap={overlap}): {str(e)}",
-                exc_info=True,
-            )
-            # Treat unexpected errors as failure for this 'mid' value
-            lower_bound = mid + 1
-
-    logger.debug(
-        f"Binary search finished after {iterations} iterations. Min success found: {min_success if found_success else 'None'}"
-    )
-
-    # If no successful value was found
-    if not found_success:
-        logger.error(
-            f"Binary search failed to find any working max_chunk_tokens for overlap {overlap} within {max_iterations} iterations. Range was [{max_sent_tok}, {upper_bound} initially]."
-        )
-        # Fallback: return a value likely larger than needed
-        return max_sent_tok + 100
-
-    # Verify the final result (min_success) as it might be the last successful 'mid'
-    try:
-        logger.debug(f"Final verification with min_success={min_success}")
-        await asyncio.shield(
-            asyncio.to_thread(chunk_by_token_limit, sentence_data, min_success, overlap)
-        )
-        logger.debug(f"Final verification successful for {min_success}")
-        return min_success
-    except ValueError:
-        # Add a small safety margin if verification fails
-        logger.warning(
-            f"Verification failed for min_success={min_success}. Returning {min_success + 5} as a safety measure."
-        )
-        return min_success + 5  # Add a small safety margin
-    except Exception as e:
-        # Return a safe fallback for unexpected verification errors
-        logger.error(
-            f"Unexpected error during final verification in _find_min_max_tokens (min_success={min_success}): {str(e)}",
-            exc_info=True,
-        )
-        return max_sent_tok + 100
-
-
-def _split_text_into_sentences(text: str, use_newline_splitting: bool) -> List[str]:
-    """
-    Helper function to split text into sentences based on the selected method.
-
-    Args:
-        text (str): The input text to be split into sentences.
-        use_newline_splitting (bool): If True, splits text at newline characters;
-                                      if False, uses regex pattern matching.
-
-    Returns:
-        List[str]: A list of sentences extracted from the input text.
-
-    Raises:
-        HTTPException: If an error occurs during sentence splitting.
-    """
-    try:
-        if use_newline_splitting:
-            sentences = split_sentences_at_newline(text)
-            logger.info(
-                f"Document split into {len(sentences)} sentences using newline splitting"
-            )
-        else:
-            sentences = split_into_sentences(text)
-            logger.info(
-                f"Document split into {len(sentences)} sentences using regex pattern matching"
-            )
-        return sentences
-    except (ValueError, RuntimeError) as e:
-        logger.error(f"Error splitting document into sentences: {str(e)}")
-        # Re-raise as HTTPException for the endpoints to catch
-        raise HTTPException(
-            status_code=400, detail=f"Error splitting document: {str(e)}"
-        )
-    except Exception as e:
-        logger.error(
-            f"Unexpected error during sentence splitting: {str(e)}", exc_info=True
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred during sentence splitting.",
-        )
 
 
 @app.get("/", tags=["Status"])
 async def health_check():
-    """Check if the API is running properly."""
-    return {"status": "healthy", "version": app.version}
+    """
+    Check if the API is running properly.
+
+    Returns:
+        dict: API status information including health status, version,
+              GPU availability, and default model configuration.
+    """
+    return {
+        "status": "healthy",
+        "version": app.version,
+        "gpu_available": torch.cuda.is_available(),
+        "default_model": DEFAULT_SAT_MODEL_NAME.value,
+    }
 
 
-@app.post("/file-chunker", response_model=ChunkingResult, tags=["Chunking"])
-async def file_chunker(
-    file: UploadFile = File(...),
+@app.post("/split-sentences/", response_model=ChunkingResult, tags=["Chunking"])
+async def split_sentences_endpoint(
+    file: UploadFile = File(
+        ..., description="Text file (.txt or .md) to split into sentences"
+    ),
+    model_name: SaTModelName = Query(
+        DEFAULT_SAT_MODEL_NAME,
+        description="The SaT model to use for sentence segmentation",
+    ),
+    split_threshold: float = Query(
+        DEFAULT_SAT_SPLIT_THRESHOLD,
+        description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
+        ge=0.0,
+        le=1.0,
+    ),
+):
+    """
+    Split a text file into sentences using WTPSplit's advanced sentence segmentation.
+
+    This endpoint processes a text file and returns the individual sentences as chunks,
+    using the WTPSplit library for accurate sentence boundary detection across multiple languages.
+
+    Note: This endpoint preprocesses the text to ignore single line breaks while preserving
+    paragraph breaks (double line breaks).
+
+    Supported file formats:
+    - .txt: Plain text files
+    - .md: Markdown files (treated as plain text for sentence splitting)
+
+    Returns:
+        ChunkingResult: Contains the list of sentences as chunks and metadata
+    """
+    start_time = time.time()
+
+    # Validate file type
+    if not file.filename.lower().endswith((".txt", ".md")):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid file type. Only .txt and .md files are supported.",
+        )
+
+    try:
+        # Read and decode the file content
+        content = await file.read()
+        text = content.decode("utf-8")
+
+        # Preprocess the text to ignore single line breaks
+        text = preprocess_text(text)
+
+        # Split the text into sentences
+        sentences = await run_in_threadpool(
+            lambda: split_sentences_NLP(
+                text, model_name=model_name, split_threshold=split_threshold
+            )
+        )
+
+        # Calculate processing time
+        processing_time = time.time() - start_time
+
+        # Create chunks from sentences and calculate token statistics
+        chunks = []
+        total_tokens = 0
+        max_tokens = 0
+        min_tokens = float("inf") if sentences else 0
+
+        for i, sentence in enumerate(sentences):
+            token_count = await run_in_threadpool(count_tokens, sentence)
+            chunks.append(Chunk(text=sentence, token_count=token_count, id=i + 1))
+            total_tokens += token_count
+            if token_count > max_tokens:
+                max_tokens = token_count
+            if token_count < min_tokens:
+                min_tokens = token_count
+
+        if not sentences:
+            min_tokens = 0  # Ensure min_tokens is 0 if there are no sentences
+
+        # Prepare metadata
+        metadata = ChunkingMetadata(
+            file=file.filename,
+            n_sentences=len(chunks),
+            avg_tokens_per_sentence=int(total_tokens / len(chunks)) if chunks else 0,
+            max_tokens_in_sentence=max_tokens,
+            min_tokens_in_sentence=min_tokens,
+            processing_time=round(processing_time, 4),
+            sat_model_name=model_name,
+            split_threshold=split_threshold,
+        )
+
+        return ChunkingResult(chunks=chunks, metadata=metadata)
+
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not decode file. Please ensure it's a valid UTF-8 encoded text file.",
+        )
+    except Exception as e:
+        logger.error(f"Error processing file: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while processing the file: {str(e)}",
+        )
+
+
+@app.post("/file-chunker/", response_model=FileChunkingResult, tags=["Chunking"])
+async def file_chunker_endpoint(
+    file: UploadFile = File(..., description="Text file (.txt or .md) to chunk"),
+    model_name: SaTModelName = Query(
+        DEFAULT_SAT_MODEL_NAME,
+        description="The SaT model to use for initial sentence segmentation",
+    ),
+    split_threshold: float = Query(
+        DEFAULT_SAT_SPLIT_THRESHOLD,
+        description="Threshold for SaT sentence splitting (confidence for boundaries)",
+        ge=0.0,
+        le=1.0,
+    ),
     max_chunk_tokens: int = Query(
-        800, description="Maximum number of tokens per chunk", gt=0
+        500, description="Maximum number of tokens per final chunk", gt=0
     ),
-    overlap: int = Query(
-        0, description="Number of sentences to overlap between consecutive chunks", ge=0
+    overlap_sentences: int = Query(
+        1, description="Number of sentences to overlap between consecutive chunks", ge=0
     ),
-    use_newline_splitting: bool = Query(
+    strict_mode: bool = Query(
         False,
-        description="If True, split text at newline characters; if False, use regex pattern matching",
+        description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits.",
     ),
 ):
-    """
-    Chunks a text file into smaller segments based on token limits with optional sentence overlap.
+    """Split a text file into chunks using SaT for sentence splitting and token-based chunking.
+
+    This endpoint first splits the text into sentences using the SaT model, then groups these
+    sentences into larger chunks based on token limits with optional sentence overlap.
 
     Args:
-        file: An uploaded text file
-        max_chunk_tokens: Maximum number of tokens per chunk
-        overlap: Number of sentences to overlap between consecutive chunks
+        file: Text file (.txt or .md) to process
+        model_name: SaT model to use for sentence splitting
+        split_threshold: Confidence threshold for sentence boundaries (0.0-1.0)
+        max_chunk_tokens: Maximum tokens allowed per chunk
+        overlap_sentences: Number of sentences to overlap between chunks (0 or more)
+        strict_mode: If True, returns an error if any chunk cannot strictly adhere to limits
 
     Returns:
-        ChunkingResult: Contains the generated chunks and metadata about the chunking process
+        ChunkingResult containing the chunks and comprehensive metadata
+
+    Raises:
+        HTTPException (400):
+            - If the file type is invalid (not .txt or .md)
+            - If strict_mode is True and chunking limits cannot be respected.
+              In this case, the response will include a structured JSON with:
+                * "chunk_process": "failed"
+                * "single_sentence_too_large": boolean flag indicating if a single sentence exceeded the token limit
+                * "overlap_too_large": boolean flag indicating if the overlap setting caused the token limit to be exceeded
+                * "suggested_token_limit": recommended token limit value to try
+                * "suggested_overlap_value": recommended overlap sentences value to try (may be None)
+        HTTPException (500): For unexpected server errors
     """
-    # Parameter validation first
-    if max_chunk_tokens <= 0:
-        error_msg = f"max_chunk_tokens must be positive, got {max_chunk_tokens}"
-        logger.error(error_msg)
-        raise HTTPException(status_code=400, detail=error_msg)
+    start_time = time.time()
+    logger.info(
+        f"Processing file {file.filename} with model={model_name.value}, "
+        f"threshold={split_threshold}, max_tokens={max_chunk_tokens}, "
+        f"overlap={overlap_sentences}, strict_mode={strict_mode}"
+    )
 
-    if overlap < 0:
-        error_msg = f"overlap must be non-negative, got {overlap}"
-        logger.error(error_msg)
-        raise HTTPException(status_code=400, detail=error_msg)
-
-    if file is None:
-        logger.error("File is required but was not provided")
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    try:
-        # Log file processing attempt
-        logger.info(
-            f"Processing file: {file.filename} (size: {file.size if hasattr(file, 'size') else 'unknown'})"
-        )
-
-        # Check file size (optional, limit to 10MB)
-        file_size_limit = 10 * 1024 * 1024  # 10MB
-        if hasattr(file, "size") and file.size > file_size_limit:
-            logger.warning(
-                f"File {file.filename} exceeds size limit of {file_size_limit} bytes"
-            )
-            raise HTTPException(
-                status_code=413, detail="File too large. Maximum allowed size is 10MB."
-            )
-
-        # Start timing
-        start_time = time.time()
-
-        # Check file extension (optional)
-        file_ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
-        allowed_extensions = {"txt", "md"}
-
-        if file_ext not in allowed_extensions:
-            logger.warning(f"Unsupported file format: {file_ext}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format. Allowed formats: {', '.join(allowed_extensions)}",
-            )
-
-        # Read file content with timeout protection
-        try:
-            # Read file content
-            file_content = await file.read()
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout reading file {file.filename}")
-            raise HTTPException(
-                status_code=408,
-                detail="Request timeout while reading file. Try with a smaller file.",
-            )
-
-        # Try to decode the content
-        try:
-            text = file_content.decode("utf-8")
-        except AttributeError:
-            # Already str
-            text = file_content
-        except UnicodeDecodeError:
-            logger.error(f"Failed to decode file {file.filename} as UTF-8")
-            raise HTTPException(
-                status_code=400, detail="File must be a valid UTF-8 text file."
-            )
-
-        # Handle empty file case
-        if not text.strip():
-            logger.warning(f"Empty file content for {file.filename}")
-            return ChunkingResult(
-                chunks=[],
-                metadata=ChunkingMetadata(
-                    n_chunks=0,
-                    avg_tokens=0,
-                    max_tokens=0,
-                    min_tokens=0,
-                    max_chunk_tokens=max_chunk_tokens,
-                    overlap=overlap,
-                    processing_time=round(time.time() - start_time, 3),
-                ),
-            )
-
-        # Step 1: Split the document using the helper function
-        sentences = _split_text_into_sentences(text, use_newline_splitting)
-
-        # Step 2: Count tokens for each sentence using default encoding (cl100k_base)
-        sentence_data = []
-        total_tokens = 0
-        try:
-            for i, sentence in enumerate(sentences):
-                token_count = count_tokens(sentence)
-                total_tokens += token_count
-                sentence_data.append(
-                    {"text": sentence, "token_count": token_count, "id": i + 1}
-                )
-            logger.info(f"Total token count: {total_tokens}")
-        except (ValueError, RuntimeError) as e:
-            logger.error(f"Error counting tokens: {str(e)}")
-            raise HTTPException(
-                status_code=400, detail=f"Error calculating tokens: {str(e)}"
-            )
-
-        # Step 3: Create chunks by token limit with optional overlap
-        try:
-            chunked_data = chunk_by_token_limit(
-                sentence_data, max_chunk_tokens=max_chunk_tokens, overlap=overlap
-            )
-        except (ValueError, TypeError) as e:
-            logger.error(f"Error during chunking: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
-        except RuntimeError as e:
-            logger.error(f"Processing error during chunking: {str(e)}")
-            raise HTTPException(
-                status_code=500, detail="Internal error during text chunking"
-            )
-
-        # Step 4: Create Chunk objects from the chunked data
-        chunks = [
-            Chunk(text=item["text"], token_count=item["token_count"], id=i + 1)
-            for i, item in enumerate(chunked_data)
-        ]
-
-        # Step 5: Calculate metadata based on the chunks
-        if chunks:
-            chunk_token_counts = [chunk.token_count for chunk in chunks]
-            processing_time = round(time.time() - start_time, 3)
-            metadata = ChunkingMetadata(
-                file=file.filename,  # Aggiungi il nome del file ai metadati
-                n_chunks=len(chunks),
-                avg_tokens=round(sum(chunk_token_counts) / len(chunk_token_counts))
-                if chunk_token_counts
-                else 0,
-                max_tokens=max(chunk_token_counts) if chunk_token_counts else 0,
-                min_tokens=min(chunk_token_counts) if chunk_token_counts else 0,
-                max_chunk_tokens=max_chunk_tokens,
-                overlap=overlap,
-                processing_time=processing_time,
-            )
-        else:
-            metadata = ChunkingMetadata(
-                file=file.filename,  # Aggiungi il nome del file ai metadati
-                n_chunks=0,
-                avg_tokens=0,
-                max_tokens=0,
-                min_tokens=0,
-                max_chunk_tokens=max_chunk_tokens,
-                overlap=overlap,
-                processing_time=round(time.time() - start_time, 3),
-            )
-
-        # Step 6: Create and return the final result
-        result = ChunkingResult(chunks=chunks, metadata=metadata)
-
-        logger.info(
-            f"Successfully processed file {file.filename}: "
-            f"Created {metadata.n_chunks} chunks, "
-            f"Average tokens per chunk: {metadata.avg_tokens}, "
-            f"Range: {metadata.min_tokens} to {metadata.max_tokens} tokens"
-        )
-        return result
-
-    except UnicodeDecodeError:
-        logger.error(f"Failed to decode file {file.filename} as UTF-8")
+    # Validate file type
+    if not file.filename.lower().endswith((".txt", ".md")):
         raise HTTPException(
             status_code=400,
-            detail="Unable to decode file. Please ensure the file is a valid text file with UTF-8 encoding.",
+            detail="Invalid file type. Only .txt and .md files are supported.",
         )
-    except HTTPException:
-        # Re-raise HTTP exceptions as they're already properly formatted
-        raise
-    except asyncio.CancelledError:
-        logger.error(f"Request for file {file.filename} was cancelled")
-        raise HTTPException(status_code=499, detail="Request cancelled")
-    except MemoryError:
-        logger.critical(f"Out of memory when processing file {file.filename}")
-        raise HTTPException(
-            status_code=500,
-            detail="Server out of memory. File is too large to process.",
-        )
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)
-        logger.error(
-            f"Error processing file {file.filename}: {error_type} - {error_msg}",
-            exc_info=True,
-        )
-
-        # Return a safe error message without exposing system details
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing the file: {error_type}. Please check the logs for more information.",
-        )
-
-
-@app.post("/adaptive-file-chunking", response_model=ChunkingResult, tags=["Chunking"])
-async def adaptive_file_chunking(
-    file: UploadFile = File(...),
-    overlap: int = Query(
-        ...,
-        description="Number of sentences to overlap (must be 1, 2, or 3)",
-        ge=1,
-        le=3,
-    ),
-    use_newline_splitting: bool = Query(
-        False,
-        description="If True, split text at newline characters; if False, use regex pattern matching",
-    ),
-):
-    """
-    Chunks a text file into smaller segments using the minimum required token limit for the specified overlap.
-
-    This endpoint calculates the minimum value of max_chunk_tokens needed for successful chunking
-    with the specified overlap, then performs the chunking using that value. This ensures the
-    densest possible chunks while maintaining the desired overlap.
-
-    Args:
-        file: An uploaded text file in UTF-8 format
-        overlap: Number of sentences to overlap between consecutive chunks (1, 2, or 3)
-
-    Returns:
-        ChunkingResult: Contains the generated chunks and metadata about the chunking process
-    """
-
-    if file is None:
-        logger.error("File is required but was not provided")
-        raise HTTPException(status_code=400, detail="No file provided")
 
     try:
-        # Log file processing attempt
-        logger.info(
-            f"Processing file with min tokens: {file.filename} (size: {file.size if hasattr(file, 'size') else 'unknown'})"
+        # Read and decode file
+        content = await file.read()
+        text = content.decode("utf-8")
+        text = preprocess_text(text)
+
+        # Split into sentences using SaT
+        sentences = await run_in_threadpool(
+            lambda: split_sentences_NLP(
+                text, model_name=model_name, split_threshold=split_threshold
+            )
         )
 
-        # Check file size (limit to 10MB)
-        file_size_limit = 10 * 1024 * 1024  # 10MB
-        if hasattr(file, "size") and file.size > file_size_limit:
-            logger.warning(
-                f"File {file.filename} exceeds size limit of {file_size_limit} bytes"
+        if not sentences:
+            # Handle empty input
+            metadata = FileChunkingMetadata(
+                file=file.filename,
+                split_threshold=split_threshold,
+                configured_max_chunk_tokens=max_chunk_tokens,
+                configured_overlap_sentences=overlap_sentences,
+                n_input_sentences=0,
+                avg_tokens_per_input_sentence=0,
+                max_tokens_in_input_sentence=0,
+                min_tokens_in_input_sentence=0,
+                n_chunks=0,
+                avg_tokens_per_chunk=0,
+                max_tokens_in_chunk=0,
+                min_tokens_in_chunk=0,
+                sat_model_name=model_name,
+                processing_time=round(time.time() - start_time, 4),
             )
-            raise HTTPException(
-                status_code=413, detail="File too large. Maximum allowed size is 10MB."
+            return FileChunkingResult(chunks=[], metadata=metadata)
+
+        # Get token counts for each sentence
+        sentences_data = []
+        total_input_tokens = 0
+        max_input_tokens = 0
+        min_input_tokens = float("inf")
+
+        for i, sentence in enumerate(sentences):
+            token_count = await run_in_threadpool(count_tokens, sentence)
+            sentences_data.append(
+                {"text": sentence, "token_count": token_count, "id": i + 1}
             )
+            total_input_tokens += token_count
+            max_input_tokens = max(max_input_tokens, token_count)
+            min_input_tokens = min(min_input_tokens, token_count)
 
-        # Start timing
-        start_time = time.time()
+        min_input_tokens = min_input_tokens if sentences_data else 0
+        avg_input_tokens = (
+            int(total_input_tokens / len(sentences_data)) if sentences_data else 0
+        )
 
-        # Check file extension
-        file_ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
-        allowed_extensions = {"txt", "md"}
-
-        if file_ext not in allowed_extensions:
-            logger.warning(f"Unsupported file format: {file_ext}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format. Allowed formats: {', '.join(allowed_extensions)}",
-            )
-
-        # Read file content with timeout protection
+        # Group sentences into chunks
         try:
-            # Read file content
-            file_content = await file.read()
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout reading file {file.filename}")
-            raise HTTPException(
-                status_code=408,
-                detail="Request timeout while reading file. Try with a smaller file.",
+            chunks_data = await _chunk_sentences_by_token_limit(
+                sentences_data, max_chunk_tokens, overlap_sentences, strict_mode
             )
+        except StrictChunkingError as e:
+            logger.warning(f"Strict mode chunking failed for {file.filename}: {str(e)}")
 
-        # Try to decode the content
-        try:
-            text = file_content.decode("utf-8")
-        except AttributeError:
-            # Already str
-            text = file_content
-        except UnicodeDecodeError:
-            logger.error(f"Failed to decode file {file.filename} as UTF-8")
-            raise HTTPException(
-                status_code=400, detail="File must be a valid UTF-8 text file."
-            )
-
-        # Handle empty file case
-        if not text.strip():
-            logger.warning(f"Empty file content for {file.filename}")
-            return ChunkingResult(
-                chunks=[],
-                metadata=ChunkingMetadata(
-                    file=file.filename,  # Aggiungi il nome del file ai metadati
-                    n_chunks=0,
-                    avg_tokens=0,
-                    max_tokens=0,
-                    min_tokens=0,
-                    max_chunk_tokens=0,
-                    overlap=overlap,
-                    processing_time=round(time.time() - start_time, 3),
+            # Create a minimal, structured error response
+            minimal_response = {
+                "chunk_process": "failed",
+                "single_sentence_too_large": e.details.get("type")
+                == "single_sentence_too_large",
+                "overlap_too_large": e.details.get("type") == "overlap_too_large",
+                "suggested_token_limit": e.suggestions.get("suggested_max_chunk_tokens")
+                if e.suggestions
+                else None,
+                "suggested_overlap_value": e.suggestions.get(
+                    "suggested_overlap_sentences"
                 ),
-            )
+            }
 
-        # Step 1: Split the document using the helper function
-        sentences = _split_text_into_sentences(text, use_newline_splitting)
-
-        # Step 2: Count tokens for each sentence using default encoding (cl100k_base)
-        sentence_data = []
-        total_tokens = 0
-        try:
-            for i, sentence in enumerate(sentences):
-                token_count = count_tokens(sentence)
-                total_tokens += token_count
-                sentence_data.append(
-                    {"text": sentence, "token_count": token_count, "id": i + 1}
-                )
-            logger.info(f"Total token count: {total_tokens}")
-
-            # Get maximum sentence token count
-            max_sent_tok = (
-                max([item["token_count"] for item in sentence_data])
-                if sentence_data
-                else 0
-            )
-        except (ValueError, RuntimeError) as e:
-            logger.error(f"Error counting tokens: {str(e)}")
-            raise HTTPException(
-                status_code=400, detail=f"Error calculating tokens: {str(e)}"
-            )
-
-        # Step 3: Calculate minimum required tokens for the specified overlap
-        try:
-            # Set a timeout for the calculation
-            timeout_seconds = 60  # Longer timeout for this operation
-
-            # Find minimum working max_chunk_tokens for the specified overlap
-            min_required_tokens = await asyncio.wait_for(
-                _find_min_max_tokens(sentence_data, max_sent_tok, overlap),
-                timeout=timeout_seconds,
-            )
-
+            # Log the full details for server-side debugging
             logger.info(
-                f"Calculated minimum required tokens: {min_required_tokens} for overlap {overlap}"
+                f"Detailed chunking failure info: {e.details}, suggestions: {e.suggestions}"
             )
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Timeout ({timeout_seconds}s) calculating minimum token limit for file {file.filename}"
-            )
+
             raise HTTPException(
-                status_code=408,
-                detail="Request timeout while calculating minimum token limit. Try with a smaller file or reduce overlap.",
-            )
-        except Exception as e:
-            logger.error(f"Error calculating minimum token limit: {str(e)}")
-            raise HTTPException(
-                status_code=500, detail="Error calculating minimum token limit"
+                status_code=400,  # Bad Request
+                detail=minimal_response,
             )
 
-        # Step 4: Create chunks using the calculated minimum token limit
-        try:
-            chunked_data = chunk_by_token_limit(
-                sentence_data, max_chunk_tokens=min_required_tokens, overlap=overlap
-            )
-        except (ValueError, TypeError) as e:
-            logger.error(f"Error during chunking: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
-        except RuntimeError as e:
-            logger.error(f"Processing error during chunking: {str(e)}")
-            raise HTTPException(
-                status_code=500, detail="Internal error during text chunking"
-            )
+        # Convert chunk data to Chunk objects and calculate output statistics
+        chunks = []
+        total_output_tokens = 0
+        max_output_tokens = 0
+        min_output_tokens = float("inf")
 
-        # Step 5: Create Chunk objects from the chunked data
-        chunks = [
-            Chunk(text=item["text"], token_count=item["token_count"], id=i + 1)
-            for i, item in enumerate(chunked_data)
-        ]
-
-        # Step 6: Calculate metadata based on the chunks
-        if chunks:
-            chunk_token_counts = [chunk.token_count for chunk in chunks]
-            processing_time = round(time.time() - start_time, 3)
-            metadata = ChunkingMetadata(
-                file=file.filename,  # Aggiungi il nome del file ai metadati
-                n_chunks=len(chunks),
-                avg_tokens=round(sum(chunk_token_counts) / len(chunk_token_counts))
-                if chunk_token_counts
-                else 0,
-                max_tokens=max(chunk_token_counts) if chunk_token_counts else 0,
-                min_tokens=min(chunk_token_counts) if chunk_token_counts else 0,
-                max_chunk_tokens=min_required_tokens,  # Use the calculated value
-                overlap=overlap,
-                processing_time=processing_time,
+        for chunk_data in chunks_data:
+            chunks.append(
+                Chunk(
+                    text=chunk_data["text"],
+                    token_count=chunk_data["token_count"],
+                    id=chunk_data["id"],
+                    overflow_details=chunk_data.get(
+                        "overflow_details"
+                    ),  # Include overflow_details if present
+                )
             )
-        else:
-            metadata = ChunkingMetadata(
-                file=file.filename,  # Aggiungi il nome del file ai metadati
-                n_chunks=0,
-                avg_tokens=0,
-                max_tokens=0,
-                min_tokens=0,
-                max_chunk_tokens=min_required_tokens,  # Use the calculated value
-                overlap=overlap,
-                processing_time=round(time.time() - start_time, 3),
-            )
+            total_output_tokens += chunk_data["token_count"]
+            max_output_tokens = max(max_output_tokens, chunk_data["token_count"])
+            min_output_tokens = min(min_output_tokens, chunk_data["token_count"])
 
-        # Step 7: Create and return the final result
-        result = ChunkingResult(chunks=chunks, metadata=metadata)
+        min_output_tokens = min_output_tokens if chunks else 0
+        avg_output_tokens = int(total_output_tokens / len(chunks)) if chunks else 0
 
-        logger.info(
-            f"Successfully processed file {file.filename} with min tokens approach: "
-            f"Created {metadata.n_chunks} chunks using min_required_tokens={min_required_tokens}, "
-            f"Average tokens per chunk: {metadata.avg_tokens}, "
-            f"Range: {metadata.min_tokens} to {metadata.max_tokens} tokens"
+        # Create metadata
+        metadata = FileChunkingMetadata(
+            file=file.filename,
+            split_threshold=split_threshold,
+            configured_max_chunk_tokens=max_chunk_tokens,
+            configured_overlap_sentences=overlap_sentences,
+            n_input_sentences=len(sentences_data),
+            avg_tokens_per_input_sentence=avg_input_tokens,
+            max_tokens_in_input_sentence=max_input_tokens,
+            min_tokens_in_input_sentence=min_input_tokens,
+            n_chunks=len(chunks),
+            avg_tokens_per_chunk=avg_output_tokens,
+            max_tokens_in_chunk=max_output_tokens,
+            min_tokens_in_chunk=min_output_tokens,
+            sat_model_name=model_name,
+            processing_time=round(time.time() - start_time, 4),
         )
-        return result
+
+        return FileChunkingResult(chunks=chunks, metadata=metadata)
 
     except UnicodeDecodeError:
-        logger.error(f"Failed to decode file {file.filename} as UTF-8")
         raise HTTPException(
             status_code=400,
-            detail="Unable to decode file. Please ensure the file is a valid text file with UTF-8 encoding.",
-        )
-    except HTTPException:
-        # Re-raise HTTP exceptions as they're already properly formatted
-        raise
-    except asyncio.CancelledError:
-        logger.error(f"Request for file {file.filename} was cancelled")
-        raise HTTPException(status_code=499, detail="Request cancelled")
-    except MemoryError:
-        logger.critical(f"Out of memory when processing file {file.filename}")
-        raise HTTPException(
-            status_code=500,
-            detail="Server out of memory. File is too large to process.",
+            detail="Could not decode file. Please ensure it's a valid UTF-8 encoded text file.",
         )
     except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)
-        logger.error(
-            f"Error processing file {file.filename} with min tokens: {error_type} - {error_msg}",
-            exc_info=True,
-        )
-
-        # Return a safe error message without exposing system details
+        logger.error(f"Error processing file: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Error processing the file: {error_type}. Please check the logs for more information.",
+            detail=f"An error occurred while processing the file: {str(e)}",
         )
