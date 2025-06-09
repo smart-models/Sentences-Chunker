@@ -5,6 +5,8 @@ import tiktoken
 import threading
 import torch
 import math
+import pickle
+from pathlib import Path
 from enum import Enum
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
@@ -181,6 +183,11 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
     logger.info("Starting Text Chunker API...")
 
+    # Create models directory if it doesn't exist
+    models_dir = Path("models")
+    models_dir.mkdir(exist_ok=True)
+    logger.info(f"Models directory: {models_dir.absolute()}")
+
     # Initialize the SaT model during startup
     try:
         logger.info(
@@ -200,8 +207,14 @@ async def lifespan(app: FastAPI):
         with _model_lock:
             for model_name in list(_model_cache.keys()):
                 if model_name in _model_cache:
+                    # Move model to CPU before deletion to free GPU memory
+                    if torch.cuda.is_available():
+                        try:
+                            _model_cache[model_name].cpu()
+                        except Exception:
+                            pass  # Model might not have a .cpu() method
                     del _model_cache[model_name]
-                    logger.info(f"Removed model {model_name} from cache")
+                    logger.info(f"Removed model {model_name} from memory cache")
 
         # Cleanup GPU memory
         if torch.cuda.is_available():
@@ -221,7 +234,7 @@ app = FastAPI(
 
 
 def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
-    """Get or initialize the SaT model with in-memory caching.
+    """Get or initialize the SaT model with persistent disk caching.
 
     Args:
         model_name (SaTModelName): Name of the SaT model to use
@@ -244,12 +257,12 @@ def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
             if current_time - last_used > CACHE_TIMEOUT
         ]
 
-        # Remove expired models
+        # Remove expired models from memory cache
         for name in expired_models:
             if (
                 name in _model_cache and name != model_key
             ):  # Don't remove the one we're about to use
-                logger.info(f"Removing expired model {name} from cache")
+                logger.info(f"Removing expired model {name} from memory cache")
                 del _model_cache[name]
                 del _model_last_used[name]
                 if torch.cuda.is_available():
@@ -261,16 +274,51 @@ def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
                 # Lazy import to avoid loading the model until needed
                 from wtpsplit import SaT
 
-                # Initialize model (will download if needed)
-                logger.info(f"Initializing WTPSplit model {model_key}")
-                _model_cache[model_key] = SaT(model_key)
+                # Create models directory if it doesn't exist
+                models_dir = Path("models")
+                models_dir.mkdir(exist_ok=True)
+
+                # Local path for the model
+                local_model_path = models_dir / f"{model_key.replace('/', '_')}.pkl"
+
+                if local_model_path.exists():
+                    # Load from local storage
+                    logger.info(f"Loading model from local storage: {local_model_path}")
+                    try:
+                        with open(local_model_path, "rb") as f:
+                            _model_cache[model_key] = pickle.load(f)
+                        logger.info(
+                            f"SaT model {model_key} loaded from disk successfully"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to load model from disk: {str(e)}, downloading fresh copy"
+                        )
+                        # If loading fails, download fresh
+                        _model_cache[model_key] = SaT(model_key)
+                        # Save the freshly downloaded model
+                        with open(local_model_path, "wb") as f:
+                            pickle.dump(_model_cache[model_key], f)
+                        logger.info(
+                            f"SaT model {model_key} downloaded and saved to disk"
+                        )
+                else:
+                    # Download and save model
+                    logger.info(
+                        f"Downloading model {model_key} and saving to {local_model_path}"
+                    )
+                    _model_cache[model_key] = SaT(model_key)
+                    # Save to disk for future use
+                    with open(local_model_path, "wb") as f:
+                        pickle.dump(_model_cache[model_key], f)
+                    logger.info(f"SaT model {model_key} saved to disk successfully")
 
                 # Use GPU if available for better performance
                 if torch.cuda.is_available():
                     _model_cache[model_key].half().to("cuda")
-                    logger.info("SaT model initialized on GPU")
+                    logger.info("SaT model moved to GPU")
                 else:
-                    logger.info("SaT model initialized on CPU")
+                    logger.info("SaT model kept on CPU")
 
             except ImportError:
                 error_msg = "WTPSplit is not installed. Please install it with: pip install wtpsplit"
@@ -310,7 +358,7 @@ def split_sentences_NLP(
 
     This function uses the Segment any Text (SaT) model from WTPSplit to intelligently
     split text into sentences, handling various edge cases and multiple languages.
-    The model is loaded only once and reused for better performance.
+    The model is loaded from disk cache if available and manages GPU memory efficiently.
 
     Args:
         doc (str): The input document text to be split into sentences.
@@ -348,8 +396,18 @@ def split_sentences_NLP(
         # Get the cached model instance
         sat = _get_sat_model(model_name)
 
+        # Ensure model is on the correct device for processing
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available() and not next(sat.parameters()).is_cuda:
+            sat.half().to(device)
+
         # Split the document into sentences
         sentences = sat.split(doc, threshold=split_threshold)
+
+        # Move model back to CPU to free GPU memory for other operations
+        if torch.cuda.is_available():
+            sat.cpu()
+            torch.cuda.empty_cache()
 
         # Filter out any empty strings that might result from the split
         return [s.strip() for s in sentences if s.strip()]
@@ -358,21 +416,23 @@ def split_sentences_NLP(
         # Already logged in get_sat_model
         raise e
     except Exception as e:
+        # Clean GPU memory in case of error
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         error_msg = f"Error in WTPSplit sentence segmentation: {str(e)}"
         logging.error(error_msg)
         raise RuntimeError(error_msg) from e
 
 
 def _round_up_to_nearest_multiple(number: float, multiple: int) -> int:
-    """
-    Round a number up to the nearest multiple of a given value.
+    """Round a number up to the nearest multiple of a given value.
 
     Args:
-        number (float): The number to round up.
-        multiple (int): The multiple to round up to. If zero, simply rounds up to the next integer.
+        number (float): The number to round up
+        multiple (int): The multiple to round up to (if zero, rounds up to next integer)
 
     Returns:
-        int: The number rounded up to the nearest multiple of the given value.
+        int: The number rounded up to nearest multiple
     """
     if multiple == 0:
         return math.ceil(number)
@@ -798,18 +858,24 @@ async def _chunk_sentences_by_token_limit(
 
 @app.get("/", tags=["Status"])
 async def health_check():
-    """
-    Check if the API is running properly.
+    """Check if the API is running properly and return status information.
 
     Returns:
-        dict: API status information including health status, version,
-              GPU availability, and default model configuration.
+        dict: API status info with health status, version, GPU availability, and models
     """
+    # Check for saved models
+    models_dir = Path("models")
+    saved_models = []
+    if models_dir.exists():
+        saved_models = [f.stem for f in models_dir.glob("*.pkl")]
+
     return {
         "status": "healthy",
         "version": app.version,
         "gpu_available": torch.cuda.is_available(),
         "default_model": DEFAULT_SAT_MODEL_NAME.value,
+        "saved_models": saved_models,
+        "models_directory": str(models_dir.absolute()),
     }
 
 
@@ -829,21 +895,14 @@ async def split_sentences_endpoint(
         le=1.0,
     ),
 ):
-    """
-    Split a text file into sentences using WTPSplit's advanced sentence segmentation.
+    """Split text file into sentences using WTPSplit's advanced segmentation.
 
-    This endpoint processes a text file and returns the individual sentences as chunks,
-    using the WTPSplit library for accurate sentence boundary detection across multiple languages.
-
-    Note: This endpoint preprocesses the text to ignore single line breaks while preserving
-    paragraph breaks (double line breaks).
-
-    Supported file formats:
-    - .txt: Plain text files
-    - .md: Markdown files (treated as plain text for sentence splitting)
+    Processes text file and returns individual sentences as chunks with metadata.
+    Preserves paragraph breaks while treating single line breaks as spaces.
+    Supports .txt and .md file formats.
 
     Returns:
-        ChunkingResult: Contains the list of sentences as chunks and metadata
+        ChunkingResult: List of sentences as chunks with metadata
     """
     start_time = time.time()
 
@@ -941,32 +1000,24 @@ async def file_chunker_endpoint(
         description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits.",
     ),
 ):
-    """Split a text file into chunks using SaT for sentence splitting and token-based chunking.
+    """Split text into token-limited chunks with optional sentence overlap.
 
-    This endpoint first splits the text into sentences using the SaT model, then groups these
-    sentences into larger chunks based on token limits with optional sentence overlap.
+    First splits text into sentences, then groups them into chunks based on token limits.
+    Provides comprehensive error feedback in strict mode when limits cannot be met.
 
     Args:
         file: Text file (.txt or .md) to process
-        model_name: SaT model to use for sentence splitting
+        model_name: SaT model for sentence splitting
         split_threshold: Confidence threshold for sentence boundaries (0.0-1.0)
-        max_chunk_tokens: Maximum tokens allowed per chunk
-        overlap_sentences: Number of sentences to overlap between chunks (0 or more)
-        strict_mode: If True, returns an error if any chunk cannot strictly adhere to limits
+        max_chunk_tokens: Maximum tokens per chunk
+        overlap_sentences: Number of sentences to overlap between chunks
+        strict_mode: If True, returns error when chunks exceed limits
 
     Returns:
-        ChunkingResult containing the chunks and comprehensive metadata
+        ChunkingResult: List of chunks with comprehensive metadata
 
     Raises:
-        HTTPException (400):
-            - If the file type is invalid (not .txt or .md)
-            - If strict_mode is True and chunking limits cannot be respected.
-              In this case, the response will include a structured JSON with:
-                * "chunk_process": "failed"
-                * "single_sentence_too_large": boolean flag indicating if a single sentence exceeded the token limit
-                * "overlap_too_large": boolean flag indicating if the overlap setting caused the token limit to be exceeded
-                * "suggested_token_limit": recommended token limit value to try
-                * "suggested_overlap_value": recommended overlap sentences value to try (may be None)
+        HTTPException (400): For invalid file types or when strict mode limits are exceeded
         HTTPException (500): For unexpected server errors
     """
     start_time = time.time()

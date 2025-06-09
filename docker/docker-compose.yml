@@ -1,37 +1,69 @@
 name: sentences-chunker
 
 services:
-  # Define a common base service
+  # 1. Define a common base service (no profile, no ports)
   base-service:
     build:
       context: ..
       dockerfile: docker/dockerfile
+    # image: sentences-chunker:latest # Image name better defined in specific services
     restart: unless-stopped
     volumes:
+      - sentences_chunker_models:/app/models
       - sentences_chunker_logs:/app/logs
     environment:
       - TOKENIZERS_PARALLELISM=false
       - LOG_LEVEL=INFO
+      # WTPSplit specific environment variables
+      - WTPSPLIT_CACHE_DIR=/app/models
     healthcheck:
-      # Check app health through the FastAPI endpoint
+      # Healthcheck needs to target port 8000 inside the container
       test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 40s  # Increased to allow for model loading
     networks:
-      - chunker-network
+      - deep-rag
 
-  # Define the service for production
-  sentences-chunker:
+  # 2. Define the CPU service extending the base
+  sentences-chunker-cpu:
     extends:
       service: base-service
-    image: sentences-chunker:latest
-    container_name: sentences-chunker
+    image: sentences-chunker:latest # Using base image
+    container_name: sentences-chunker-cpu # More specific name
+    profiles:
+      - cpu
     ports:
-      - "8000:8000"
+      - "8000:8000" # Add ports here
+    environment:
+      - CUDA_VISIBLE_DEVICES=-1  # Force CPU usage
+
+  # 3. Define the GPU service extending the base
+  sentences-chunker-gpu:
+    extends:
+      service: base-service
+    image: sentences-chunker:latest # Using base image
+    container_name: sentences-chunker-gpu
+    profiles:
+      - gpu
+    ports:
+      - "8000:8000" # Add ports here
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ compute, utility ]
 
 volumes:
+  sentences_chunker_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ../models
   sentences_chunker_logs:
     driver: local
     driver_opts:
@@ -40,6 +72,6 @@ volumes:
       device: ../logs
 
 networks:
-  chunker-network:
-    name: chunker-network
+  deep-rag:
+    name: deep-rag
     driver: bridge

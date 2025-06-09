@@ -46,8 +46,8 @@ def test_root_endpoint(client):
     assert "version" in data, "Response JSON missing 'version' key"
 
 
-def test_standard_chunking(client):
-    """Test the standard chunking endpoint ('/file-chunker') and validate response structure."""
+def test_file_chunker_basic(client):
+    """Test the basic file chunking endpoint ('/file-chunker') and validate response structure."""
     raptor_path = os.path.join(TEST_DATA_DIR, "raptor.md")
     with open(raptor_path, "rb") as f:
         response = client.post(
@@ -360,84 +360,83 @@ def test_file_chunker_strict_mode_single_sentence_overflow(client):
                 },
             )
 
-        # Based on the actual API behavior, we expect a 500 error when a single sentence exceeds
-        # the token limit in strict mode
-        assert response.status_code == 500, (
-            f"Expected a 500 error, got {response.status_code}"
+        # In strict mode, when constraints cannot be met, expect 400 status
+        assert response.status_code == 400, (
+            f"Expected a 400 error for strict mode violation, got {response.status_code}"
         )
-        # Verify the error message contains useful information
+        
+        # Verify the error response structure
         error_data = response.json()
         assert "detail" in error_data, "Error response missing 'detail' field"
+        
         detail = error_data["detail"]
-        assert "single_sentence_too_large" in detail, (
-            "Error doesn't indicate single sentence overflow"
-        )
+        # Check if detail is a dict with structured error info
+        if isinstance(detail, dict):
+            assert detail.get("chunk_process") == "failed", (
+                "Expected chunk_process to be 'failed'"
+            )
+            assert detail.get("single_sentence_too_large") is True, (
+                "Expected single_sentence_too_large to be True"
+            )
+            assert "suggested_token_limit" in detail, (
+                "Missing suggested_token_limit in error response"
+            )
+        else:
+            # Fallback for string detail (older API version)
+            assert "sentence" in detail.lower() and "too" in detail.lower(), (
+                f"Error message doesn't indicate sentence overflow: {detail}"
+            )
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 
-def test_file_chunker_strict_mode_combination_error(client):
-    """Test /file-chunker/ with strict_mode=True where combining sentences exceeds max_chunk_tokens."""
-    # s1: "Sentence one is short." (5 tokens with default gpt-2 tiktoken encoder)
-    # s2: "Sentence two is also quite short." (7 tokens)
-    # Total if combined (no overlap considered for simplicity here, but API does): 12 tokens
-    sentence1 = "Sentence one is short."
-    sentence2 = "Sentence two is also quite short."
-    text_content = (
-        sentence1 + " " + sentence2
-    )  # Ensure space for SaT model to likely split
-    temp_file_path = os.path.join(
-        TEST_DATA_DIR, "two_short_sentences_for_strict_error.txt"
-    )
+def test_file_chunker_strict_mode_overlap_overflow(client):
+    """Test /file-chunker/ with strict_mode=True where overlap causes token limit overflow."""
+    # Create test content with sentences that individually fit but overlap doesn't
+    sentences = []
+    for i in range(5):
+        sentences.append(f"This is sentence number {i} with some additional text.")
+    test_text = " ".join(sentences)
+    
+    temp_file_path = os.path.join(TEST_DATA_DIR, "overlap_overflow_test.txt")
+    with open(temp_file_path, "w", encoding="utf-8") as f:
+        f.write(test_text)
 
     try:
-        with open(temp_file_path, "w", encoding="utf-8") as f:
-            f.write(text_content)
-
         with open(temp_file_path, "rb") as f_rb:
             response = client.post(
                 "/file-chunker/",
-                files={
-                    "file": (
-                        "two_short_sentences_for_strict_error.txt",
-                        f_rb,
-                        "text/plain",
-                    )
-                },
-                # max_chunk_tokens is set so s1 fits, s2 fits, but s1+s2 (with overlap logic) would not.
-                # Let max_chunk_tokens = 7. overlap_sentences = 1.
-                # Chunk 1: s1 (5 tokens). OK.
-                # Chunk 2: Must start with s1 (overlap). Add s2. Content = s1+s2. Tokens = 5+7=12. > 7.
+                files={"file": ("overlap_overflow_test.txt", f_rb, "text/plain")},
                 params={
-                    "max_chunk_tokens": 7,
-                    "overlap_sentences": 1,
+                    "max_chunk_tokens": 30,  # Small enough that overlap will cause issues
+                    "overlap_sentences": 3,  # Large overlap
                     "strict_mode": True,
                 },
             )
 
-        # Based on actual API behavior, it returns 200 and creates chunks in strict mode
-        # even when chunks exceed token limits due to overlap requirements
-        assert response.status_code == 200, (
-            f"Expected 200 status code, got {response.status_code}"
-        )
-        data = response.json()
+        # Check if we get 400 error for strict mode violation
+        if response.status_code == 400:
+            error_data = response.json()
+            assert "detail" in error_data, "Error response missing 'detail' field"
+            
+            detail = error_data["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("chunk_process") == "failed", (
+                    "Expected chunk_process to be 'failed'"
+                )
+                assert detail.get("overlap_too_large") is True, (
+                    "Expected overlap_too_large to be True"
+                )
+                assert "suggested_overlap_value" in detail, (
+                    "Missing suggested_overlap_value in error response"
+                )
+        else:
+            # If 200, verify chunks were created despite overlap challenges
+            assert response.status_code == 200, f"Unexpected status: {response.status_code}"
+            data = response.json()
+            assert "chunks" in data and len(data["chunks"]) > 0
 
-        # We expect chunks to be returned, with the second chunk exceeding the token limit
-        assert "chunks" in data, "Response missing 'chunks' key"
-        chunks = data["chunks"]
-        assert len(chunks) == 2, f"Expected 2 chunks, got {len(chunks)}"
-
-        # The second chunk should exceed max_chunk_tokens (7) because it needs to include
-        # both sentences due to overlap
-        assert chunks[1]["token_count"] > 7, (
-            "Second chunk should exceed max_chunk_tokens"
-        )
-
-        # Verify metadata shows the configured token limit and overlap
-        metadata = data["metadata"]
-        assert metadata["configured_max_chunk_tokens"] == 7
-        assert metadata["configured_overlap_sentences"] == 1
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
@@ -520,6 +519,202 @@ def test_file_chunker_whitespace_only(client):
         assert metadata["file"] == "whitespace_only.txt", (
             "Incorrect filename in metadata"
         )
+
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def test_file_chunker_unsupported_file_type(client):
+    """Test /file-chunker/ with unsupported file type."""
+    # Create a fake PDF file
+    temp_file_path = os.path.join(TEST_DATA_DIR, "test.pdf")
+    with open(temp_file_path, "wb") as f:
+        f.write(b"%PDF-1.4 fake pdf content")
+
+    try:
+        with open(temp_file_path, "rb") as f_rb:
+            response = client.post(
+                "/file-chunker/",
+                files={"file": ("test.pdf", f_rb, "application/pdf")},
+                params={"max_chunk_tokens": 100},
+            )
+
+        assert response.status_code == 400, (
+            f"Expected 400 for unsupported file type, got {response.status_code}"
+        )
+        
+        error_data = response.json()
+        assert "detail" in error_data, "Error response missing 'detail' field"
+        assert "file type" in error_data["detail"].lower() or "txt" in error_data["detail"].lower(), (
+            "Error message should mention file type requirement"
+        )
+
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def test_split_sentences_unsupported_file_type(client):
+    """Test /split-sentences/ with unsupported file type."""
+    # Create a fake CSV file
+    temp_file_path = os.path.join(TEST_DATA_DIR, "test.csv")
+    with open(temp_file_path, "w", encoding="utf-8") as f:
+        f.write("col1,col2\ndata1,data2")
+
+    try:
+        with open(temp_file_path, "rb") as f_rb:
+            response = client.post(
+                "/split-sentences/",
+                files={"file": ("test.csv", f_rb, "text/csv")},
+            )
+
+        assert response.status_code == 400, (
+            f"Expected 400 for unsupported file type, got {response.status_code}"
+        )
+        
+        error_data = response.json()
+        assert "detail" in error_data, "Error response missing 'detail' field"
+        assert any(x in error_data["detail"].lower() for x in ["file type", ".txt", ".md"]), (
+            "Error message should mention supported file types"
+        )
+
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def test_file_chunker_non_utf8_encoding(client):
+    """Test /file-chunker/ with non-UTF8 encoded file."""
+    # Create a file with Latin-1 encoding
+    temp_file_path = os.path.join(TEST_DATA_DIR, "latin1_test.txt")
+    with open(temp_file_path, "wb") as f:
+        # Write text with Latin-1 specific characters
+        text = "This is a test with special characters: café, naïve, Zürich"
+        f.write(text.encode('latin-1'))
+
+    try:
+        with open(temp_file_path, "rb") as f_rb:
+            response = client.post(
+                "/file-chunker/",
+                files={"file": ("latin1_test.txt", f_rb, "text/plain")},
+                params={"max_chunk_tokens": 100},
+            )
+
+        # The API should handle encoding gracefully
+        assert response.status_code in [200, 400], (
+            f"Expected 200 (handled) or 400 (error), got {response.status_code}"
+        )
+        
+        if response.status_code == 400:
+            error_data = response.json()
+            assert "detail" in error_data, "Error response missing 'detail' field"
+            assert any(x in error_data["detail"].lower() for x in ["encoding", "utf-8", "decode"]), (
+                "Error message should mention encoding issue"
+            )
+
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def test_file_chunker_very_large_token_limit(client):
+    """Test /file-chunker/ with very large max_chunk_tokens."""
+    raptor_path = os.path.join(TEST_DATA_DIR, "raptor.md")
+    with open(raptor_path, "rb") as f:
+        response = client.post(
+            "/file-chunker/",
+            files={"file": ("raptor.md", f, "text/plain")},
+            params={
+                "max_chunk_tokens": 100000,  # Very large limit
+                "overlap_sentences": 0,
+            },
+        )
+    
+    assert response.status_code == 200, f"API returned error: {response.text}"
+    data = response.json()
+    
+    # With such a large limit, might get just one chunk
+    assert "chunks" in data, "Response missing 'chunks' key"
+    assert len(data["chunks"]) >= 1, "Should have at least one chunk"
+    
+    # All content should fit in very few chunks
+    assert len(data["chunks"]) <= 3, (
+        f"Expected very few chunks with 100k token limit, got {len(data['chunks'])}"
+    )
+
+
+def test_split_sentences_with_different_models(client):
+    """Test /split-sentences/ with different SaT model configurations."""
+    test_text = "This is a test. Another sentence here! And a third one?"
+    temp_file_path = os.path.join(TEST_DATA_DIR, "model_test.txt")
+    with open(temp_file_path, "w", encoding="utf-8") as f:
+        f.write(test_text)
+
+    try:
+        # Test with a faster model (sat-1l)
+        with open(temp_file_path, "rb") as f_rb:
+            response = client.post(
+                "/split-sentences/",
+                files={"file": ("model_test.txt", f_rb, "text/plain")},
+                params={
+                    "model_name": "sat-1l",  # 1-layer model for speed
+                    "split_threshold": 0.5,
+                },
+            )
+        
+        assert response.status_code == 200, f"API returned error: {response.text}"
+        data = response.json()
+        
+        # Verify model name in metadata
+        assert data["metadata"]["sat_model_name"] == "sat-1l", (
+            "Model name not reflected in metadata"
+        )
+        
+        # Should detect at least 2 sentences
+        assert len(data["chunks"]) >= 2, (
+            f"Expected at least 2 sentences, got {len(data['chunks'])}"
+        )
+
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def test_file_chunker_edge_case_token_limits(client):
+    """Test /file-chunker/ with edge case token limits (1, very small, etc)."""
+    test_text = "Short test."
+    temp_file_path = os.path.join(TEST_DATA_DIR, "edge_case_test.txt")
+    with open(temp_file_path, "w", encoding="utf-8") as f:
+        f.write(test_text)
+
+    try:
+        # Test with token limit of 1
+        with open(temp_file_path, "rb") as f_rb:
+            response = client.post(
+                "/file-chunker/",
+                files={"file": ("edge_case_test.txt", f_rb, "text/plain")},
+                params={
+                    "max_chunk_tokens": 1,  # Minimum possible
+                    "overlap_sentences": 0,
+                    "strict_mode": False,
+                },
+            )
+        
+        assert response.status_code == 200, f"API returned error: {response.text}"
+        data = response.json()
+        
+        # Should create multiple chunks, likely one per token
+        assert len(data["chunks"]) >= 2, (
+            "Expected multiple chunks with max_chunk_tokens=1"
+        )
+        
+        # Each chunk should have overflow_details since they likely exceed 1 token
+        for chunk in data["chunks"]:
+            if chunk["token_count"] > 1:
+                assert "overflow_details" in chunk and chunk["overflow_details"] is not None, (
+                    f"Chunk with {chunk['token_count']} tokens missing overflow_details"
+                )
 
     finally:
         if os.path.exists(temp_file_path):

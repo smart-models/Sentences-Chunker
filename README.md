@@ -1,40 +1,153 @@
+![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
+![CUDA 12.1](https://img.shields.io/badge/CUDA-12.1-blue)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Latest-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
 
+![Sentences Chunker](logo.png)
+
 # Sentences Chunker
 
-The Sentences Chunker is a cutting-edge tool designed to intelligently segment text documents into optimally-sized chunks. It prioritizes sentence boundaries to preserve natural language structure and context, while adhering to specified token limits. This makes it an ideal tool for preparing text data for downstream Natural Language Processing (NLP) tasks, especially for ingestion by Large Language Models (LLMs) and for creating effective knowledge bases for Retrieval Augmented Generation (RAG) systems.
+The Sentences Chunker is a cutting-edge tool that revolutionizes text segmentation for modern NLP applications by intelligently splitting documents into optimally-sized chunks while preserving sentence boundaries and semantic integrity.
+This innovative solution leverages state-of-the-art [WTPSplit (Where's the Point? Self-Supervised Multilingual Punctuation-Agnostic Sentence Segmentation)](https://github.com/segment-any-text/wtpsplit) technology to deliver unparalleled accuracy across 85+ languages without requiring language-specific models or punctuation.
+Traditional text chunkers often break sentences arbitrarily at token limits, destroying context and meaning. This leads to degraded performance in downstream tasks like embeddings generation, retrieval-augmented generation (RAG), and language model processing.
+The Sentences Chunker overcomes these challenges by combining advanced sentence boundary detection with intelligent token-aware chunking. It ensures chunks respect natural language boundaries while adhering to strict token limits, with configurable sentence overlap for maintaining context across chunk boundaries.
+Whether you're building RAG pipelines, preparing training data, or optimizing text for LLM consumption, the Sentences Chunker provides a robust, production-ready solution for intelligent text segmentation.
 
 ## Key Features
+-   **Advanced Sentence Segmentation**: Powered by WTPSplit's neural models for state-of-the-art sentence boundary detection across 85+ languages.
+-   **Flexible Model Selection**: Choose from multiple SaT (Segment any Text) models optimized for different speed/accuracy trade-offs (1-layer to 12-layer variants).
+-   **Precise Token Control**: Enforce strict token limits per chunk while preserving sentence integrity.
+-   **Configurable Sentence Overlap**: Maintain contextual continuity between chunks with customizable overlap settings.
+-   **Strict Mode with Smart Suggestions**: Get intelligent parameter recommendations when chunking constraints cannot be met.
+-   **GPU Acceleration**: CUDA-enabled for fast processing with automatic GPU/CPU detection.
+-   **Persistent Model Caching**: Models are saved to disk after first download for instant subsequent loads.
+-   **Comprehensive Metadata**: Detailed statistics on chunking results including token distribution and processing metrics.
+-   **Universal REST API with FastAPI**: Modern, high-performance API interface with automatic documentation, data validation, and seamless integration capabilities for any system or language.
+-   **Docker Integration**: Easy deployment with GPU/CPU profiles and automatic hardware detection.
 
--   **Flexible Sentence Splitting**: Offers two distinct methods for initial sentence segmentation:
-    -   **Newline-based Splitting**: A straightforward approach treating each line (separated by `\n`) as a distinct sentence. Ideal for texts where line breaks intentionally demarcate sentences.
-    -   **Regex-based Splitting**: Utilizes a sophisticated regular expression to identify sentence boundaries, handling common edge cases like abbreviations, titles, and decimal numbers for more nuanced segmentation.
--   **Token-Constrained Chunking**: Allows precise control over the maximum number of tokens permitted in each chunk. Ensures chunks are compatible with model context window limitations.
--   **Adaptive Token Limiting**: Automatically determines the minimum tokens required to successfully chunk the document with a specified sentence overlap. This feature produces the densest possible chunks while respecting the desired overlap, optimizing token utilization.
--   **Configurable Sentence Overlap**: Enables defining a specific number of sentences from the end of one chunk to be included at the beginning of the next. This helps maintain contextual continuity across chunks.
--   **Comprehensive Processing Metadata**: Returns detailed metadata with each chunking result, including:
-    -   Original filename
-    -   Total number of chunks generated
-    -   Average, minimum, and maximum token counts across chunks
-    -   The max chunk tokens setting used (either user-specified or adaptively determined)
-    -   The sentence overlap setting used
-    -   Total processing time
--   **Robust and Easy-to-Integrate API**: Built with FastAPI, offering a clean, well-documented RESTful interface for seamless integration into various workflows. Includes structured logging and robust error handling.
+## Table of Contents
+
+- [How the Text Chunking Algorithm Works](#how-the-text-chunking-algorithm-works)
+  - [The Pipeline](#the-pipeline)
+  - [Intelligent Overlap Management](#intelligent-overlap-management)
+  - [Strict Mode and Parameter Optimization](#strict-mode-and-parameter-optimization)
+  - [Comparison with Traditional Chunking](#comparison-with-traditional-chunking)
+- [Advantages of the Solution](#advantages-of-the-solution)
+  - [Superior Sentence Segmentation](#superior-sentence-segmentation)
+  - [Optimal for RAG and LLM Applications](#optimal-for-rag-and-llm-applications)
+  - [Performance and Scalability](#performance-and-scalability)
+- [Installation and Deployment](#installation-and-deployment)
+  - [Prerequisites](#prerequisites)
+  - [Getting the Code](#getting-the-code)
+  - [Local Installation with Uvicorn](#local-installation-with-uvicorn)
+  - [Docker Deployment (Recommended)](#docker-deployment-recommended)
+- [Using the API](#using-the-api)
+  - [API Endpoints](#api-endpoints)
+  - [Example API Call](#example-api-call)
+  - [Response Format](#response-format)
+- [Contributing](#contributing)
+
+## How the Text Chunking Algorithm Works
+
+### The Pipeline
+
+The Sentences Chunker implements a sophisticated multi-stage pipeline that combines neural sentence segmentation with intelligent chunking:
+
+1. The application exposes a REST API where users upload text documents with parameters for token limits, overlap settings, and model selection.
+2. Text preprocessing handles single line breaks while preserving paragraph boundaries for optimal sentence detection.
+3. The WTPSplit SaT model performs neural sentence segmentation, handling complex cases like abbreviations, URLs, and multilingual text.
+4. Each sentence is tokenized using the cl100k_base encoding (compatible with modern LLMs) to calculate precise token counts.
+5. An intelligent chunking algorithm groups sentences while respecting the maximum token limit.
+6. Optional sentence overlap is applied between chunks to maintain context continuity.
+7. In strict mode, the system validates all constraints and provides smart parameter suggestions if limits cannot be met.
+8. The API returns structured JSON with chunks, token counts, and comprehensive metadata.
+
+### Intelligent Overlap Management
+
+The overlap feature ensures contextual continuity between chunks, critical for RAG applications:
+
+```python
+# Take last N sentences from previous chunk as overlap
+overlap_start_index = max(0, len(current_chunk_sentences) - configured_overlap_sentences)
+overlap_data = current_chunk_sentences[overlap_start_index:]
+```
+
+When overlap would exceed token limits, the system:
+- In normal mode: Creates the chunk with a warning in overflow_details
+- In strict mode: Calculates optimal parameters and suggests adjustments with safety margins
+
+### Strict Mode and Parameter Optimization
+
+Strict mode ensures absolute compliance with constraints and provides intelligent suggestions:
+
+```python
+# Calculate suggested max_chunk_tokens with 30% safety margin
+tokens_with_margin = base_required_tokens * 1.3
+suggested_max_t = round_up_to_nearest_100(tokens_with_margin)
+
+# Provide actionable suggestions
+suggestions = {
+    "suggested_max_chunk_tokens": suggested_max_t,
+    "suggested_overlap_sentences": optimal_overlap,
+    "message": detailed_explanation
+}
+```
+
+### Comparison with Traditional Chunking
+
+| Feature | Traditional Chunking | Sentences Chunker |
+|---------|---------------------|-------------------|
+| Sentence Detection | Basic regex or newline splits | Neural model with 85+ language support |
+| Boundary Preservation | Often breaks mid-sentence | Always preserves sentence boundaries |
+| Token Counting | Approximate or character-based | Precise tiktoken-based counting |
+| Overlap Handling | Fixed character/token overlap | Intelligent sentence-based overlap |
+| Error Handling | Basic validation | Smart parameter suggestions |
+| Model Persistence | Downloads every run | Caches models to disk |
+| GPU Support | Rarely implemented | Automatic GPU/CPU detection |
+
+## Advantages of the Solution
+
+### Superior Sentence Segmentation
+
+WTPSplit's neural models provide:
+- **Language Agnostic**: Works across 85+ languages without configuration
+- **Punctuation Agnostic**: Handles text without punctuation marks
+- **Context Aware**: Understands abbreviations, URLs, and special cases
+- **Configurable Confidence**: Adjustable split threshold for different use cases
+
+### Optimal for RAG and LLM Applications
+
+Chunks generated are ideal for modern NLP pipelines:
+- **Semantic Integrity**: Complete sentences preserve meaning and context
+- **Token Precision**: Exact token counts ensure compatibility with model limits
+- **Context Windows**: Overlap maintains continuity for retrieval tasks
+- **Metadata Rich**: Detailed statistics for pipeline optimization
+
+### Performance and Scalability
+
+Production-ready features include:
+- **GPU Acceleration**: Automatic CUDA detection and optimization
+- **Model Caching**: Persistent storage eliminates redundant downloads
+- **Async Processing**: FastAPI with uvloop for high concurrency
+- **Memory Management**: Efficient GPU memory handling with automatic cleanup
+- **Docker Profiles**: Separate CPU/GPU deployments with health checks
 
 ## Installation and Deployment
 
 ### Prerequisites
+
 - Docker and Docker Compose (for Docker deployment)
-- Python 3.10 or higher
+- NVIDIA GPU with CUDA support (recommended for performance)
+- NVIDIA Container Toolkit (for GPU passthrough in Docker)
+- Python 3.10-3.12 (for local installation)
 
 ### Getting the Code
 
 Before proceeding with any installation method, clone the repository:
 ```bash
-git clone https://github.com/smart-models/Sentences-Chunker.git
-cd Sentences-Chunker
+git clone https://github.com/yourusername/sentences-chunker.git
+cd sentences-chunker
 ```
 
 ### Local Installation with Uvicorn
@@ -49,7 +162,7 @@ cd Sentences-Chunker
    
    * Using Command Prompt:
    ```cmd
-   .venv\Scripts\activate.bat
+   venv\Scripts\activate.bat
    ```
    
    * Using PowerShell:
@@ -58,13 +171,18 @@ cd Sentences-Chunker
    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
    
    # Then activate the virtual environment:
-   .venv\Scripts\Activate.ps1
+   venv\Scripts\Activate.ps1
    ```
    > **Note:** PowerShell's default security settings may prevent script execution. The above command temporarily allows scripts for the current session only, which is safer than changing system-wide settings.
 
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
+   ```
+
+   Note: For GPU support, ensure you install the correct PyTorch version:
+   ```bash
+   pip install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.1.1+cu121
    ```
 
 3. Run the FastAPI server:
@@ -81,9 +199,10 @@ cd Sentences-Chunker
 1. Create required directories for persistent storage:
    ```bash
    # Linux/macOS
-   mkdir -p logs
+   mkdir -p models logs
    
    # Windows CMD
+   mkdir models
    mkdir logs
    
    # Windows PowerShell
@@ -95,119 +214,102 @@ cd Sentences-Chunker
 
 2. Deploy with Docker Compose:
 
+   **CPU-only deployment** (default, works on all machines):
    ```bash
    cd docker
-   docker compose up -d
+   docker compose --profile cpu up -d
+   ```
+
+   **GPU-accelerated deployment** (requires NVIDIA GPU and drivers):
+   ```bash
+   cd docker
+   docker compose --profile gpu up -d
+   ```
+
+   **Automatic GPU/CPU detection** (using helper scripts):
+   ```bash
+   # Linux/Mac
+   ./docker-manager.sh
+   # Select option 2 for auto-detection
+
+   # Windows PowerShell
+   .\docker-manager.ps1
+   # Select option 2 for auto-detection
    ```
 
    **Stopping the service**:
    
+   > **Important**: Always match the `--profile` flag between your `up` and `down` commands:
    ```bash
-   docker compose down
+   # To stop CPU deployment
+   docker compose --profile cpu down
+   
+   # To stop GPU deployment
+   docker compose --profile gpu down
    ```
+   > This ensures Docker Compose correctly identifies and manages the specific set of containers you intended to control.
 
 3. The API will be available at `http://localhost:8000`.
    
    Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
 
-
 ## Using the API
 
 ### API Endpoints
 
-#### **`GET /`**
-Health check endpoint that returns the service status and API version.
+- **POST `/file-chunker/`**  
+  Chunks a text document into segments based on specified token limits with optional sentence overlap.
+  
+  **Parameters:**
+  - `file`: The text file to be chunked (supports .txt and .md formats)
+  - `model_name`: WTPSplit SaT model to use (default: sat-12l-sm)
+  - `split_threshold`: Confidence threshold for sentence boundaries (0.0-1.0, default: 0.5)
+  - `max_chunk_tokens`: Maximum tokens per chunk (integer, default: 500)
+  - `overlap_sentences`: Number of sentences to overlap between chunks (default: 1)
+  - `strict_mode`: If true, enforces all constraints strictly (boolean, default: false)
+  
+  **Response:**
+  Returns a JSON object containing:
+  - `chunks`: Array of text segments with token counts, IDs, and overflow details
+  - `metadata`: Comprehensive processing statistics
 
-**Response:**
-Returns a JSON object containing:
-*   `status`: Current health status of the service (e.g., "healthy").
-*   `version`: The current version of the API.
+- **POST `/split-sentences/`**  
+  Splits text into individual sentences without chunking.
+  
+  **Parameters:**
+  - `file`: The text file to split (supports .txt and .md formats)
+  - `model_name`: WTPSplit SaT model to use (default: sat-12l-sm)
+  - `split_threshold`: Confidence threshold for boundaries (0.0-1.0, default: 0.5)
+  
+  **Response:**
+  Returns sentences as individual chunks with token counts and metadata.
 
----
-
-#### **`POST /file-chunker/`**
-Chunks a text document into segments based on specified token limits and sentence overlap using WTPSplit's advanced sentence segmentation.
-
-**Parameters:**
-
-*   `file`: (File, required) The text file to be chunked. Supported formats: `.txt`, `.md`.
-*   `model_name`: (Query, string, optional, default: "sat-12l-sm") The SaT model to use for sentence segmentation. Available models: sat-1l, sat-1l-sm, sat-3l, sat-3l-sm, sat-6l, sat-6l-sm, sat-9l, sat-12l, sat-12l-sm.
-*   `split_threshold`: (Query, float, optional, default: 0.5) Threshold for sentence splitting (confidence for boundaries), between 0.0 and 1.0.
-*   `max_chunk_tokens`: (Query, integer, optional, default: 500) Maximum number of tokens per chunk. Must be greater than 0.
-*   `overlap_sentences`: (Query, integer, optional, default: 1) Number of sentences to overlap between consecutive chunks. Must be 0 or more.
-*   `strict_mode`: (Query, boolean, optional, default: `False`) If `True`, returns an error if any chunk cannot strictly adhere to token/overlap limits.
-
-**Response:**
-Returns a `FileChunkingResult` JSON object containing:
-*   `chunks`: An array of `Chunk` objects, each with:
-    - `text`: The combined text of all sentences in the chunk
-    - `token_count`: Total tokens in the chunk
-    - `id`: Sequential chunk identifier
-    - `overflow_details`: (Only present in non-strict mode) Information about why limits were exceeded
-*   `metadata`: A `FileChunkingMetadata` object with comprehensive statistics including:
-    - File information and processing time
-    - Input sentence statistics (count, token distribution)
-    - Output chunk statistics (count, token distribution)
-    - Configuration used (model, split threshold, token limit, overlap)
-
----
-
-#### **`POST /split-sentences/`**
-Splits a text file into sentences using WTPSplit's advanced sentence segmentation without chunking.
-
-**Parameters:**
-
-*   `file`: (File, required) The text file to split into sentences. Supported formats: `.txt`, `.md`.
-*   `model_name`: (Query, string, optional, default: "sat-12l-sm") The SaT model to use for sentence segmentation.
-*   `split_threshold`: (Query, float, optional, default: 0.5) Threshold value for sentence splitting (confidence score for sentence boundaries), between 0.0 and 1.0.
-
-**Response:**
-Returns a `ChunkingResult` JSON object containing:
-*   `chunks`: An array of `Chunk` objects, each representing a single sentence with `text`, `token_count`, and `id`.
-*   `metadata`: A `ChunkingMetadata` object with statistics about the sentence splitting process.
-
----
+- **GET `/`**  
+  Health check endpoint that returns service status, GPU availability, saved models, and API version.
 
 ### Example API Call using cURL
 
-**Health check endpoint**
-```bash 
-curl http://localhost:8000/
-```
-
-**Basic usage for /file-chunker/ (uses default parameters)**
 ```bash
+# Basic file chunking with defaults
 curl -X POST "http://localhost:8000/file-chunker/" \
-  -F "file=@document.txt" \
-  -H "accept: application/json"
-```
+  -F "file=@document.txt" 
 
-**With all parameters specified for /file-chunker/**
-```bash
-curl -X POST "http://localhost:8000/file-chunker/\
-  ?max_chunk_tokens=1000\
-  &overlap_sentences=2\
-  &model_name=sat-6l-sm\
-  &split_threshold=0.6\
-  &strict_mode=true" \
+# Advanced chunking with all parameters
+curl -X POST "http://localhost:8000/file-chunker/?\
+max_chunk_tokens=1024&\
+overlap_sentences=2&\
+model_name=sat-6l&\
+split_threshold=0.6&\
+strict_mode=true" \
   -F "file=@document.txt" \
   -H "accept: application/json"
-```
 
-**Basic usage for /split-sentences/**
-```bash
-curl -X POST "http://localhost:8000/split-sentences/" \
-  -F "file=@document.txt" \
-  -H "accept: application/json"
-```
+# Split into sentences only
+curl -X POST "http://localhost:8000/split-sentences/?model_name=sat-3l" \
+  -F "file=@document.txt"
 
-**With all parameters specified for /split-sentences/**
-```bash
-curl -X POST "http://localhost:8000/split-sentences/\
-  ?model_name=sat-3l\
-  &split_threshold=0.7" \
-  -F "file=@document.txt" \
-  -H "accept: application/json"
+# Health check with model information
+curl http://localhost:8000/
 ```
 
 ### Example API Call using Python
@@ -216,95 +318,110 @@ curl -X POST "http://localhost:8000/split-sentences/\
 import requests
 import json
 
-# Replace with your actual API base URL if hosted elsewhere
-api_base_url = 'http://localhost:8000'
-file_path = 'document.txt' # Your input text file
+# API configuration
+api_url = 'http://localhost:8000/file-chunker/'
+file_path = 'document.txt'  # Your input text file
 
-# --- Example for /file-chunker/ ---
-print("--- Testing /file-chunker/ endpoint ---")
-file_chunker_url = f"{api_base_url}/file-chunker/"
-params_file_chunker = {
-    'max_chunk_tokens': 500,
-    'overlap': 1,
-    'use_newline_splitting': False
+# Chunking parameters
+params = {
+    'max_chunk_tokens': 512,
+    'overlap_sentences': 2,
+    'model_name': 'sat-12l-sm',  # Best accuracy
+    'split_threshold': 0.5,
+    'strict_mode': True  # Enforce constraints
 }
 
 try:
     with open(file_path, 'rb') as f:
         files = {'file': (file_path, f, 'text/plain')}
-        response = requests.post(file_chunker_url, files=files, params=params_file_chunker)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response = requests.post(api_url, files=files, params=params)
+        response.raise_for_status()
 
         result = response.json()
-        print(f"Successfully chunked document using /file-chunker/ into {result['metadata']['n_chunks']} chunks.")
-        # print("Metadata:", result['metadata'])
-        # print("First chunk:", result['chunks'][0] if result['chunks'] else "No chunks")
+        
+        # Handle successful response
+        print(f"Successfully chunked into {result['metadata']['n_chunks']} chunks")
+        print(f"Average tokens per chunk: {result['metadata']['avg_tokens_per_chunk']}")
+        print(f"Processing time: {result['metadata']['processing_time']:.2f}s")
+        
+        # Save results
+        with open('chunks_output.json', 'w', encoding='utf-8') as out:
+            json.dump(result, out, indent=2, ensure_ascii=False)
 
-        output_file_fc = 'response_file_chunker.json'
-        with open(output_file_fc, 'w', encoding='utf-8') as outfile:
-            json.dump(result, outfile, indent=4, ensure_ascii=False)
-        print(f"Response from /file-chunker/ saved to {output_file_fc}\n")
-
-except FileNotFoundError:
-    print(f"Error: File not found at {file_path}")
-except requests.exceptions.RequestException as e:
-    print(f"API Request to /file-chunker/ failed: {e}")
-    if e.response is not None:
-        print("Error details:", e.response.text)
+except requests.exceptions.HTTPError as e:
+    if e.response.status_code == 400:
+        # Handle strict mode violations
+        error_detail = e.response.json()['detail']
+        if isinstance(error_detail, dict) and error_detail.get('chunk_process') == 'failed':
+            print("Chunking failed due to constraints. Suggestions:")
+            if error_detail.get('suggested_token_limit'):
+                print(f"  - Try max_chunk_tokens={error_detail['suggested_token_limit']}")
+            if error_detail.get('suggested_overlap_value') is not None:
+                print(f"  - Try overlap_sentences={error_detail['suggested_overlap_value']}")
+    else:
+        print(f"API error: {e}")
 except Exception as e:
-    print(f"An unexpected error occurred with /file-chunker/: {e}")
+    print(f"Error: {e}")
+```
 
-# --- Example for /adaptive-file-chunking/ ---
-print("--- Testing /adaptive-file-chunking/ endpoint ---")
-adaptive_chunking_url = f"{api_base_url}/adaptive-file-chunking/"
-params_adaptive = {
-    'overlap': 2,
-    'use_newline_splitting': False
+### Response Format
+
+A successful chunking operation returns a `FileChunkingResult` object:
+
+```json
+{
+  "chunks": [
+    {
+      "text": "This is the first chunk containing complete sentences...",
+      "token_count": 487,
+      "id": 1,
+      "overflow_details": null
+    },
+    {
+      "text": "The second chunk starts with overlap sentences from the previous chunk...",
+      "token_count": 502,
+      "id": 2,
+      "overflow_details": null
+    }
+  ],
+  "metadata": {
+    "file": "document.txt",
+    "configured_max_chunk_tokens": 512,
+    "configured_overlap_sentences": 2,
+    "n_input_sentences": 150,
+    "avg_tokens_per_input_sentence": 24,
+    "max_tokens_in_input_sentence": 89,
+    "min_tokens_in_input_sentence": 5,
+    "n_chunks": 8,
+    "avg_tokens_per_chunk": 495,
+    "max_tokens_in_chunk": 512,
+    "min_tokens_in_chunk": 234,
+    "sat_model_name": "sat-12l-sm",
+    "split_threshold": 0.5,
+    "processing_time": 2.34
+  }
 }
+```
 
-try:
-    with open(file_path, 'rb') as f:
-        files = {'file': (file_path, f, 'text/plain')}
-        response = requests.post(adaptive_chunking_url, files=files, params=params_adaptive)
-        response.raise_for_status() # Raise an exception for bad status codes
+For strict mode violations, the API returns a 400 status with suggestions:
 
-        result = response.json()
-        print(f"Successfully chunked document using /adaptive-file-chunking/ into {result['metadata']['n_chunks']} chunks.")
-        print(f"Adaptive method determined max_chunk_tokens: {result['metadata']['max_chunk_tokens']}")
-        # print("Metadata:", result['metadata'])
-        # print("First chunk:", result['chunks'][0] if result['chunks'] else "No chunks")
-
-        output_file_adaptive = 'response_adaptive_chunking.json'
-        with open(output_file_adaptive, 'w', encoding='utf-8') as outfile:
-            json.dump(result, outfile, indent=4, ensure_ascii=False)
-        print(f"Response from /adaptive-file-chunking/ saved to {output_file_adaptive}\n")
-
-except FileNotFoundError:
-    print(f"Error: File not found at {file_path}")
-except requests.exceptions.RequestException as e:
-    print(f"API Request to /adaptive-file-chunking/ failed: {e}")
-    if e.response is not None:
-        print("Error details:", e.response.text)
-except Exception as e:
-    print(f"An unexpected error occurred with /adaptive-file-chunking/: {e}")
-
-# --- Example for Health Check / ---
-print("--- Testing / (Health Check) endpoint ---")
-health_check_url = f"{api_base_url}/"
-try:
-    response = requests.get(health_check_url)
-    response.raise_for_status()
-    health_status = response.json()
-    print("Health Check Status:", health_status)
-except requests.exceptions.RequestException as e:
-    print(f"API Request to / failed: {e}")
-except Exception as e:
-    print(f"An unexpected error occurred with /: {e}")
+```json
+{
+  "detail": {
+    "chunk_process": "failed",
+    "single_sentence_too_large": false,
+    "overlap_too_large": true,
+    "suggested_token_limit": 800,
+    "suggested_overlap_value": 1
+  }
+}
 ```
 
 ## Contributing
 
-The Sentences Chunker is an open-source project that welcomes contributions from the community. Whether you're fixing bugs, improving documentation, adding new features, or sharing ideas, every contribution helps build a better tool for everyone.
+The Sentences Chunker is an open-source project that thrives on community contributions. Your involvement is not just welcome, it's fundamental to the project's growth, innovation, and long-term success.
+
+Whether you're fixing bugs, improving documentation, adding new features, or sharing ideas, every contribution helps build a better tool for everyone. We believe in the power of collaborative development and welcome participants of all skill levels.
 
 If you're interested in contributing:
 
@@ -315,6 +432,6 @@ If you're interested in contributing:
 5. Ensure all tests pass
 6. Submit a pull request
 
-Happy Text Chunking!
+Happy Sentence Chunking!
 
 ---
