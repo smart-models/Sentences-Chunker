@@ -1,7 +1,7 @@
 ![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
 ![CUDA 12.1](https://img.shields.io/badge/CUDA-12.1-blue)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-Latest-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
 
 ![Sentences Chunker](logo.png)
@@ -69,8 +69,9 @@ The overlap feature ensures contextual continuity between chunks, critical for R
 
 ```python
 # Take last N sentences from previous chunk as overlap
-overlap_start_index = max(0, len(current_chunk_sentences) - configured_overlap_sentences)
-overlap_data = current_chunk_sentences[overlap_start_index:]
+# previous_chunk_sentences contains sentences from the last finalized chunk
+overlap_start_index = max(0, len(previous_chunk_sentences) - configured_overlap_sentences)
+overlap_sentences = previous_chunk_sentences[overlap_start_index:]
 ```
 
 When overlap would exceed token limits, the system:
@@ -226,17 +227,6 @@ cd sentences-chunker
    docker compose --profile gpu up -d
    ```
 
-   **Automatic GPU/CPU detection** (using helper scripts):
-   ```bash
-   # Linux/Mac
-   ./docker-manager.sh
-   # Select option 2 for auto-detection
-
-   # Windows PowerShell
-   .\docker-manager.ps1
-   # Select option 2 for auto-detection
-   ```
-
    **Stopping the service**:
    
    > **Important**: Always match the `--profile` flag between your `up` and `down` commands:
@@ -262,10 +252,10 @@ cd sentences-chunker
   
   **Parameters:**
   - `file`: The text file to be chunked (supports .txt and .md formats)
-  - `model_name`: WTPSplit SaT model to use (default: sat-12l-sm)
+  - `model_name`: WTPSplit SaT model to use (default: sat_1l_sm)
   - `split_threshold`: Confidence threshold for sentence boundaries (0.0-1.0, default: 0.5)
   - `max_chunk_tokens`: Maximum tokens per chunk (integer, default: 500)
-  - `overlap_sentences`: Number of sentences to overlap between chunks (default: 1)
+  - `overlap_sentences`: Number of sentences to overlap between chunks (0-3, where 0 disables overlap, default: 1)
   - `strict_mode`: If true, enforces all constraints strictly (boolean, default: false)
   
   **Response:**
