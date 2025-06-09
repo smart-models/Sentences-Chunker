@@ -1,4 +1,4 @@
-# WHAT IS IT?
+![What is it?](what-is-it.jpg)
 
 ## 1. Purpose of the Code
 
