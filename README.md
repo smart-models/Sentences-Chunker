@@ -147,7 +147,7 @@ Production-ready features include:
 
 Before proceeding with any installation method, clone the repository:
 ```bash
-git clone https://github.com/yourusername/sentences-chunker.git
+git clone https://github.com/smart-models/Sentences-Chunker.git
 cd sentences-chunker
 ```
 
@@ -252,7 +252,7 @@ cd sentences-chunker
   
   **Parameters:**
   - `file`: The text file to be chunked (supports .txt and .md formats)
-  - `model_name`: WTPSplit SaT model to use (default: sat_1l_sm)
+  - `model_name`: WTPSplit SaT model to use (default: sat_12l_sm)
   - `split_threshold`: Confidence threshold for sentence boundaries (0.0-1.0, default: 0.5)
   - `max_chunk_tokens`: Maximum tokens per chunk (integer, default: 500)
   - `overlap_sentences`: Number of sentences to overlap between chunks (0-3, where 0 disables overlap, default: 1)
