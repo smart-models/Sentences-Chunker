@@ -1,5 +1,5 @@
 ![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green)
-![CUDA 12.1](https://img.shields.io/badge/CUDA-12.1-blue)
+![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-blue)
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
@@ -374,8 +374,7 @@ A successful chunking operation returns a `FileChunkingResult` object:
       "overflow_details": null
     }
   ],
-  "metadata": {
-    "file": "document.txt",
+  "metadata": {  
     "configured_max_chunk_tokens": 512,
     "configured_overlap_sentences": 2,
     "n_input_sentences": 150,
@@ -388,6 +387,7 @@ A successful chunking operation returns a `FileChunkingResult` object:
     "min_tokens_in_chunk": 234,
     "sat_model_name": "sat-12l-sm",
     "split_threshold": 0.5,
+    "source": "document.txt",
     "processing_time": 2.34
   }
 }

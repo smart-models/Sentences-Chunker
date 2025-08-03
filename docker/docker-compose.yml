@@ -6,7 +6,7 @@ services:
     build:
       context: ..
       dockerfile: docker/dockerfile
-    # image: sentences-chunker:latest # Image name better defined in specific services
+    image: sentences-chunker:latest 
     restart: unless-stopped
     volumes:
       - sentences_chunker_models:/app/models
@@ -14,41 +14,51 @@ services:
     environment:
       - TOKENIZERS_PARALLELISM=false
       - LOG_LEVEL=INFO
-      # WTPSplit specific environment variables
+
+      # Cache and Threading Optimizations
       - WTPSPLIT_CACHE_DIR=/app/models
+      - MODEL_CACHE_TIMEOUT=${MODEL_CACHE_TIMEOUT:-3600}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+
+      # GPU Memory Optimizations
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - CUDA_LAUNCH_BLOCKING=0
+      - CUDA_CACHE_DISABLE=0
+      
+      # Performance Tuning
+      - PYTHONUNBUFFERED=1
+      - TORCH_CUDNN_V8_API_ENABLED=1
     healthcheck:
       # Healthcheck needs to target port 8000 inside the container
       test: [ "CMD", "curl", "-f", "http://localhost:8000/", "||", "exit", "1" ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s  # Increased to allow for model loading
+      start_period: 40s 
     networks:
       - deep-rag
 
   # 2. Define the CPU service extending the base
-  sentences-chunker-cpu:
+  cpu:
     extends:
       service: base-service
-    image: sentences-chunker:latest # Using base image
-    container_name: sentences-chunker-cpu # More specific name
+    container_name: sentences-chunker-cpu 
     profiles:
       - cpu
     ports:
-      - "8000:8000" # Add ports here
-    environment:
-      - CUDA_VISIBLE_DEVICES=-1  # Force CPU usage
+      - "${APP_PORT:-8000}:8000" 
+  
 
   # 3. Define the GPU service extending the base
-  sentences-chunker-gpu:
+  gpu:
     extends:
       service: base-service
-    image: sentences-chunker:latest # Using base image
     container_name: sentences-chunker-gpu
     profiles:
       - gpu
     ports:
-      - "8000:8000" # Add ports here
+      - "${APP_PORT:-8000}:8000" 
     deploy:
       resources:
         reservations:

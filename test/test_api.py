@@ -93,7 +93,7 @@ def test_file_chunker_basic(client):
     # Validate metadata
     metadata = data["metadata"]
     expected_meta_keys = [
-        "file",
+        "source",
         "configured_max_chunk_tokens",
         "configured_overlap_sentences",
         "n_input_sentences",
@@ -113,7 +113,7 @@ def test_file_chunker_basic(client):
             f"Metadata missing '{key}' field. Available: {list(metadata.keys())}"
         )
 
-    assert metadata["file"] == "raptor.md", "Metadata 'file' name mismatch"
+    assert metadata["source"] == "raptor.md", "Metadata 'source' name mismatch"
     assert metadata["n_chunks"] == len(chunks), "Metadata 'n_chunks' mismatch"
     assert metadata["configured_max_chunk_tokens"] == 600, (
         "Metadata 'configured_max_chunk_tokens' mismatch"
@@ -166,7 +166,7 @@ def test_split_sentences_endpoint(client):
     # Validate metadata (specific to ChunkingMetadata for /split-sentences/)
     metadata = data["metadata"]
     expected_meta_keys = [
-        "file",
+        "source",
         "n_sentences",
         "avg_tokens_per_sentence",
         "max_tokens_in_sentence",
@@ -180,7 +180,7 @@ def test_split_sentences_endpoint(client):
             f"Metadata missing '{key}' field. Available: {list(metadata.keys())}"
         )
 
-    assert metadata["file"] == "raptor.md", "Metadata 'file' name mismatch"
+    assert metadata["source"] == "raptor.md", "Metadata 'source' name mismatch"
     assert metadata["n_sentences"] == len(chunks), "Metadata 'n_sentences' mismatch"
     assert "sat_model_name" in metadata  # Check presence, value can be default
     assert "split_threshold" in metadata  # Check presence, value can be default
@@ -433,7 +433,7 @@ def test_file_chunker_empty_file(client):
         # Verify metadata has expected structure
         assert "metadata" in data, "Response missing 'metadata' key"
         metadata = data["metadata"]
-        assert metadata["file"] == "empty_file.txt", "Incorrect filename in metadata"
+        assert metadata["source"] == "empty_file.txt", "Incorrect filename in metadata"
         assert metadata["n_chunks"] == 0, "Expected 0 chunks in metadata"
         assert metadata["n_input_sentences"] == 0, "Expected 0 input sentences"
 
@@ -482,7 +482,7 @@ def test_file_chunker_whitespace_only(client):
         # Verify metadata has expected structure
         assert "metadata" in data, "Response missing 'metadata' key"
         metadata = data["metadata"]
-        assert metadata["file"] == "whitespace_only.txt", (
+        assert metadata["source"] == "whitespace_only.txt", (
             "Incorrect filename in metadata"
         )
 

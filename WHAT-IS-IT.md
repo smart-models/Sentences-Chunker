@@ -55,7 +55,6 @@ The API returns structured JSON responses with comprehensive metadata:
     }
   ],
   "metadata": {
-    "file": "document.txt",
     "configured_max_chunk_tokens": 500,
     "configured_overlap_sentences": 1,
     "n_input_sentences": 250,         // Pre-chunking statistics
@@ -68,6 +67,7 @@ The API returns structured JSON responses with comprehensive metadata:
     "min_tokens_in_chunk": 156,
     "sat_model_name": "sat-12l-sm",
     "split_threshold": 0.5,
+    "source": "document.txt",
     "processing_time": 2.34
   }
 }

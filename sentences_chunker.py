@@ -91,8 +91,10 @@ class Chunk(BaseModel):
 class ChunkingMetadata(BaseModel):
     """Metadata about the sentence splitting process and results."""
 
-    file: str = Field(..., description="Name of the processed file.")
     n_sentences: int = Field(..., description="Total number of sentences generated.")
+    split_threshold: float = Field(
+        ..., description="Threshold used for sentence splitting."
+    )
     avg_tokens_per_sentence: int = Field(
         ..., description="Average number of tokens per sentence."
     )
@@ -102,22 +104,18 @@ class ChunkingMetadata(BaseModel):
     min_tokens_in_sentence: int = Field(
         ..., description="Minimum number of tokens in any single sentence."
     )
-    processing_time: float = Field(
-        ..., description="Total time taken for processing in seconds."
-    )
     sat_model_name: SaTModelName = Field(
         ..., description="Name of the SaT model used for splitting."
     )
-    split_threshold: float = Field(
-        ..., description="Threshold used for sentence splitting."
+    source: str = Field(..., description="Name of the processed file.")
+    processing_time: float = Field(
+        ..., description="Total time taken for processing in seconds."
     )
 
 
 class FileChunkingMetadata(BaseModel):
     """Metadata about the file chunking process and results."""
 
-    # Fields ordered to match the instance creation order at lines 1003-1018
-    file: str = Field(..., description="Name of the processed file.")
     configured_max_chunk_tokens: int = Field(
         ..., description="Maximum token limit per chunk for token chunker."
     )
@@ -146,6 +144,7 @@ class FileChunkingMetadata(BaseModel):
     split_threshold: float = Field(
         ..., description="Threshold used for sentence splitting."
     )
+    source: str = Field(..., description="Name of the processed file.")
     processing_time: float = Field(
         ..., description="Total time taken for processing in seconds."
     )
@@ -228,7 +227,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Text Chunker API",
     description="API for chunking text documents into smaller segments with control over token count and overlap",
-    version="0.6.0",
+    version="0.6.1",
     lifespan=lifespan,
 )
 
@@ -864,18 +863,16 @@ async def health_check():
         dict: API status info with health status, version, GPU availability, and models
     """
     # Check for saved models
-    models_dir = Path("models")
-    saved_models = []
-    if models_dir.exists():
-        saved_models = [f.stem for f in models_dir.glob("*.pkl")]
+    # models_dir = Path("models")
+    # saved_models = []
+    # if models_dir.exists():
+    #     saved_models = [f.stem for f in models_dir.glob("*.pkl")]
 
     return {
         "status": "healthy",
         "version": app.version,
         "gpu_available": torch.cuda.is_available(),
         "default_model": DEFAULT_SAT_MODEL_NAME.value,
-        "saved_models": saved_models,
-        "models_directory": str(models_dir.absolute()),
     }
 
 
@@ -951,14 +948,14 @@ async def split_sentences_endpoint(
 
         # Prepare metadata
         metadata = ChunkingMetadata(
-            file=file.filename,
             n_sentences=len(chunks),
             avg_tokens_per_sentence=int(total_tokens / len(chunks)) if chunks else 0,
             max_tokens_in_sentence=max_tokens,
             min_tokens_in_sentence=min_tokens,
-            processing_time=round(processing_time, 4),
             sat_model_name=model_name,
             split_threshold=split_threshold,
+            source=file.filename,
+            processing_time=round(processing_time, 4),
         )
 
         return ChunkingResult(chunks=chunks, metadata=metadata)
@@ -1050,7 +1047,6 @@ async def file_chunker_endpoint(
         if not sentences:
             # Handle empty input
             metadata = FileChunkingMetadata(
-                file=file.filename,
                 split_threshold=split_threshold,
                 configured_max_chunk_tokens=max_chunk_tokens,
                 configured_overlap_sentences=overlap_sentences,
@@ -1063,6 +1059,7 @@ async def file_chunker_endpoint(
                 max_tokens_in_chunk=0,
                 min_tokens_in_chunk=0,
                 sat_model_name=model_name,
+                source=file.filename,
                 processing_time=round(time.time() - start_time, 4),
             )
             return FileChunkingResult(chunks=[], metadata=metadata)
@@ -1145,7 +1142,6 @@ async def file_chunker_endpoint(
 
         # Create metadata
         metadata = FileChunkingMetadata(
-            file=file.filename,
             split_threshold=split_threshold,
             configured_max_chunk_tokens=max_chunk_tokens,
             configured_overlap_sentences=overlap_sentences,
@@ -1158,6 +1154,7 @@ async def file_chunker_endpoint(
             max_tokens_in_chunk=max_output_tokens,
             min_tokens_in_chunk=min_output_tokens,
             sat_model_name=model_name,
+            source=file.filename,
             processing_time=round(time.time() - start_time, 4),
         )
 
