@@ -1,0 +1,93 @@
+# Stage 1: Builder Stage - Install dependencies and build wheels if necessary
+FROM python:3.10-slim AS builder
+
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip in venv
+RUN python -m pip install --upgrade pip
+
+WORKDIR /app
+
+# Copy only requirements first to leverage cache
+COPY docker/requirements.txt .
+
+# Install CPU-only PyTorch and other dependencies
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code AFTER installing dependencies
+COPY sentences_chunker.py .
+
+# Create directories needed by the app
+RUN mkdir -p /app/models /app/logs
+
+# ---
+
+# Stage 2: Final Stage - Setup runtime environment
+FROM python:3.10-slim
+
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy virtual environment from builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+# Copy application code from builder stage
+COPY --from=builder /app/sentences_chunker.py .
+
+# Copy pre-created directories (important for ownership later)
+COPY --from=builder /app/models /app/models
+COPY --from=builder /app/logs /app/logs
+
+# Set environment variables for Python and Tokenizers
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    TOKENIZERS_PARALLELISM=false \
+    PYTORCH_ENABLE_MPS_FALLBACK=1
+
+# Create a non-root user and group
+RUN groupadd -r appgroup && useradd -r -g appgroup -m -d /home/appuser -s /bin/bash appuser
+
+# Grant ownership of the app directory and venv to the appuser
+RUN chown -R appuser:appgroup /app /opt/venv /home/appuser && \
+    chmod -R 755 /app && \
+    chmod -R u+w /app/logs /app/models
+
+# Switch to non-root user
+USER appuser
+
+# Expose the port the app runs on
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
+
+# Command to run the application using uvicorn
+CMD ["uvicorn", "sentences_chunker:app", \
+    "--host", "0.0.0.0", \
+    "--port", "8000", \
+    "--workers", "1", \
+    "--limit-concurrency", "50", \
+    "--loop", "uvloop", \
+    "--http", "httptools"]

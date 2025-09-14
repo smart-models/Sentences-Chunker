@@ -3,6 +3,7 @@
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
+[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml)
 
 ![Sentences Chunker](logo.png)
 
@@ -195,7 +196,64 @@ cd sentences-chunker
    
    Access the API documentation and interactive testing interface at `http://localhost:8000/docs`.
 
-### Docker Deployment (Recommended)
+### Pre-built Docker Images
+
+[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml)
+
+Pre-built Docker images are automatically built and available for download from GitHub Container Registry:
+
+#### Quick Start with Pre-built Images
+
+**CPU Version (works on all machines):**
+```bash
+docker pull ghcr.io/smart-models/sentences-chunker:latest-cpu
+docker run -d -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --name sentences-chunker-cpu \
+  ghcr.io/smart-models/sentences-chunker:latest-cpu
+```
+
+**GPU Version (requires NVIDIA Docker):**
+```bash
+docker pull ghcr.io/smart-models/sentences-chunker:latest-gpu
+docker run -d -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --gpus all \
+  --name sentences-chunker-gpu \
+  ghcr.io/smart-models/sentences-chunker:latest-gpu
+```
+
+#### Available Image Tags
+
+| Tag | Description | Use Case |
+|-----|-------------|----------|
+| `latest-cpu` | CPU-optimized version (~2GB) | Development, general use |
+| `latest-gpu` | GPU-accelerated version (~4GB) | Production, high-performance |
+| `v1.0.0-cpu` | Specific version CPU | Stable deployments |
+| `v1.0.0-gpu` | Specific version GPU | Stable deployments |
+
+#### Using Docker Compose with Pre-built Images
+
+Create a `docker-compose.yml` file:
+```yaml
+version: '3.8'
+services:
+  sentences-chunker:
+    image: ghcr.io/smart-models/sentences-chunker:latest-cpu  # or latest-gpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - MODEL_CACHE_DIR=/app/models
+```
+
+Then run: `docker compose up -d`
+
+### Docker Deployment (Build from Source)
 
 1. Create required directories for persistent storage:
    ```bash

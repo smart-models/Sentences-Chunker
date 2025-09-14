@@ -5,7 +5,7 @@ services:
   base-service:
     build:
       context: ..
-      dockerfile: docker/dockerfile
+      dockerfile: docker/Dockerfile.gpu  # Default to GPU version
     image: sentences-chunker:latest 
     restart: unless-stopped
     volumes:
