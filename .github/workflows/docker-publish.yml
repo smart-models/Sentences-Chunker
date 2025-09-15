@@ -1,0 +1,211 @@
+name: Build and Publish Docker Images
+
+# Trigger workflow on push to main branch or version tags
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    # Set permissions for GITHUB_TOKEN
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            dockerfile: docker/dockerfile
+            platforms: linux/amd64
+            cache-scope: cpu
+          - variant: gpu  
+            dockerfile: docker/dockerfile
+            platforms: linux/amd64
+            cache-scope: gpu
+    
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Step 2: Set up Docker Buildx for advanced features
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+            image=moby/buildkit:latest
+      
+      # Step 3: Log in to GitHub Container Registry
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Step 4: Extract metadata for Docker
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+            suffix=-${{ matrix.variant }},onlatest=true
+          tags: |
+            # For version tags (v1.2.3), create vrelease-variant tag
+            type=ref,event=tag,prefix=v,suffix=-${{ matrix.variant }}
+            # For main branch, create latest-variant tag
+            type=raw,value=latest-${{ matrix.variant }},enable={{is_default_branch}}
+            # For PRs, create pr-number-variant tag
+            type=ref,event=pr,suffix=-${{ matrix.variant }}
+      
+      # Step 5: Generate build args based on variant
+      - name: Set build arguments
+        id: build-args
+        run: |
+          if [ "${{ matrix.variant }}" = "gpu" ]; then
+            echo "BUILD_ARGS=ENABLE_GPU=true" >> $GITHUB_OUTPUT
+            echo "LABELS=gpu.cuda=12.1.0" >> $GITHUB_OUTPUT
+          else
+            echo "BUILD_ARGS=ENABLE_GPU=false" >> $GITHUB_OUTPUT
+            echo "LABELS=gpu.cuda=none" >> $GITHUB_OUTPUT
+          fi
+      
+      # Step 6: Build and push Docker image
+      - name: Build and push Docker image (${{ matrix.variant }})
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            ${{ steps.build-args.outputs.LABELS }}
+          cache-from: type=gha,scope=${{ matrix.cache-scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache-scope }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            ${{ steps.build-args.outputs.BUILD_ARGS }}
+      
+      # Step 7: Generate artifact attestation for supply chain security
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      
+      # Step 8: Output image details
+      - name: Image details
+        run: |
+          echo "✅ Successfully built and pushed ${{ matrix.variant }} image"
+          echo "📦 Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
+          echo "🔖 Digest: ${{ steps.build.outputs.digest }}"
+  
+  # Job to verify images after push
+  verify-images:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    permissions:
+      packages: read
+    
+    steps:
+      - name: Verify CPU image
+        run: |
+          echo "Verifying CPU image..."
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu || true
+      
+      - name: Verify GPU image  
+        run: |
+          echo "Verifying GPU image..."
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu || true
+      
+      - name: List available tags
+        run: |
+          echo "📋 Available image tags:"
+          # Using GitHub API to list package versions
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/user/packages/container/${{ github.event.repository.name }}/versions" \
+            | jq -r '.[] | .metadata.container.tags[]' | sort -u || echo "Unable to fetch tags"
+  
+  # Job to create release notes (only on version tags)
+  create-release:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## 🚀 Docker Images Published
+            
+            This release includes Docker images for both CPU and GPU variants:
+            
+            ### CPU Image
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
+            docker pull ghcr.io/${{ github.repository }}:latest-cpu
+            ```
+            
+            ### GPU Image (CUDA 12.1)
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
+            docker pull ghcr.io/${{ github.repository }}:latest-gpu
+            ```
+            
+            ### Docker Compose
+            ```bash
+            # CPU deployment
+            cd docker
+            docker compose --profile cpu up -d
+            
+            # GPU deployment
+            cd docker
+            docker compose --profile gpu up -d
+            ```
+            
+            For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
+          draft: false
+          prerelease: false
+          generate_release_notes: true
