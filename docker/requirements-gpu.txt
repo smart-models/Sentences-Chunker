@@ -1,8 +1,7 @@
 # Base dependencies
 -r requirements-base.txt
 
-# PyTorch GPU version with CUDA support
---extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.6.0+cu126
-torchvision
-torchaudio
+# PyTorch GPU version with CUDA 12.1 support (lighter than 12.6)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0,<2.3.0
+torchvision>=0.16.0,<0.18.0
