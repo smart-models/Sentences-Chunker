@@ -1,72 +1,106 @@
-# Ultra-lightweight GPU Dockerfile to solve disk space issues
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+# Stage 1: Lightweight Builder Stage
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS builder
 
-# Prevent apt-get prompts and set aggressive cleanup
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install minimal Python and cleanup immediately
+# Install minimal build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-venv \
     python3-pip \
+    build-essential \
+    git \
     curl \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/*
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Create venv and install dependencies in single layer
-RUN python3.10 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip wheel setuptools \
-    && /opt/venv/bin/pip cache purge
-
-# Set PATH
+# Create and activate virtual environment
+RUN python3.10 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip and install wheel for faster builds
+RUN python -m pip install --upgrade pip wheel setuptools
 
 WORKDIR /app
 
-# Copy requirements and install with aggressive cleanup
+# Copy requirements files for dependency resolution
 COPY docker/requirements-base.txt .
 COPY docker/requirements-gpu.txt .
 
-# Install dependencies with immediate cleanup in single RUN to minimize layers
+# Install dependencies with aggressive caching cleanup
 RUN pip install --no-cache-dir -r requirements-gpu.txt \
     && pip cache purge \
     && find /opt/venv -name "*.pyc" -delete \
     && find /opt/venv -name "__pycache__" -type d -exec rm -rf {} + || true \
-    && find /opt/venv -name "*.pyo" -delete \
-    && find /opt/venv -name "tests" -type d -exec rm -rf {} + || true \
-    && find /opt/venv -name "test" -type d -exec rm -rf {} + || true \
-    && rm -rf /tmp/* /var/tmp/* \
-    && rm -f requirements-*.txt
+    && find /opt/venv -name "*.pyo" -delete
 
-# Copy application code
+# Copy application code AFTER installing dependencies
 COPY sentences_chunker.py .
 
-# Create directories and user in single layer
-RUN mkdir -p /app/models /app/logs \
-    && groupadd -r appgroup \
-    && useradd -r -g appgroup -m -d /home/appuser -s /bin/bash appuser \
-    && chown -R appuser:appgroup /app /opt/venv /home/appuser \
-    && chmod -R 755 /app \
-    && chmod -R u+w /app/logs /app/models
+# Create directories needed by the app
+RUN mkdir -p /app/models /app/logs
 
-# Set final environment
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+# ---
+
+# Stage 2: Minimal Runtime Stage
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+
+# Prevent apt-get prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only essential runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    libgomp1 \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+# Copy virtual environment from builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+# Copy application code from builder stage
+COPY --from=builder /app/sentences_chunker.py .
+
+# Copy pre-created directories
+COPY --from=builder /app/models /app/models
+COPY --from=builder /app/logs /app/logs
+
+# Set environment variables for Python, CUDA, and Tokenizers
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_VISIBLE_DEVICES=all \
-    TOKENIZERS_PARALLELISM=false
+    TOKENIZERS_PARALLELISM=false \
+    PIP_NO_CACHE_DIR=1
 
+# Create a non-root user and group
+RUN groupadd -r appgroup && useradd -r -g appgroup -m -d /home/appuser -s /bin/bash appuser
+
+# Grant ownership of the app directory and venv to the appuser
+RUN chown -R appuser:appgroup /app /opt/venv /home/appuser && \
+    chmod -R 755 /app && \
+    chmod -R u+w /app/logs /app/models
+
+# Switch to non-root user
 USER appuser
 
+# Expose the port the app runs on
 EXPOSE 8000
 
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
+# Command to run the application using uvicorn
 CMD ["uvicorn", "sentences_chunker:app", \
     "--host", "0.0.0.0", \
     "--port", "8000", \
     "--workers", "1", \
-    "--limit-concurrency", "50"]
+    "--limit-concurrency", "50", \
+    "--loop", "uvloop", \
+    "--http", "httptools"]

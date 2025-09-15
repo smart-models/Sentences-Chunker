@@ -1,6 +1,7 @@
 # Base dependencies
 -r requirements-base.txt
 
-# Minimal PyTorch GPU version - no optional dependencies  
+# PyTorch GPU version with CUDA 12.1 support (lighter than 12.6)
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.2+cu121 --no-deps
+torch>=2.1.0,<2.3.0
+torchvision>=0.16.0,<0.18.0
