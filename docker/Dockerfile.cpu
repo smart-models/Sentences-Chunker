@@ -20,12 +20,12 @@ RUN python -m pip install --upgrade pip
 
 WORKDIR /app
 
-# Copy only requirements first to leverage cache
-COPY docker/requirements.txt .
+# Copy requirements files for dependency resolution
+COPY docker/requirements-base.txt .
+COPY docker/requirements-cpu.txt .
 
-# Install CPU-only PyTorch and other dependencies
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies (PyTorch CPU will be installed automatically)
+RUN pip install --no-cache-dir -r requirements-cpu.txt
 
 # Copy application code AFTER installing dependencies
 COPY sentences_chunker.py .

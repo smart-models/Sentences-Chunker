@@ -1,0 +1,8 @@
+# Base dependencies
+-r requirements-base.txt
+
+# PyTorch CPU-only version
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.1.0
+torchvision
+torchaudio

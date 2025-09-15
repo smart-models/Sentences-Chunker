@@ -23,12 +23,13 @@ RUN python -m pip install --upgrade pip
 
 WORKDIR /app
 
-# Copy only requirements first to leverage cache
+# Copy requirements files for dependency resolution
 # --- Path Correction: Specify the path relative to the build context ---
-COPY docker/requirements.txt .
+COPY docker/requirements-base.txt .
+COPY docker/requirements-gpu.txt .
 
 # Install Python dependencies into the virtual environment
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-gpu.txt
 
 # Copy application code AFTER installing dependencies
 # --- Path Correction: This path is correct IF build context is project root ---
