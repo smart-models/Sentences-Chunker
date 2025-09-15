@@ -3,7 +3,7 @@
 ![Python 3.10](https://img.shields.io/badge/Python-3.10-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-blue)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
-[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml)
+[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/main.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/main.yml)
 
 ![Sentences Chunker](logo.png)
 
@@ -198,7 +198,7 @@ cd sentences-chunker
 
 ### Pre-built Docker Images
 
-[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/docker-publish.yml)
+[![Docker Build](https://github.com/smart-models/Sentences-Chunker/actions/workflows/main.yml/badge.svg)](https://github.com/smart-models/Sentences-Chunker/actions/workflows/main.yml)
 
 Pre-built Docker images are automatically built and available for download from GitHub Container Registry:
 
