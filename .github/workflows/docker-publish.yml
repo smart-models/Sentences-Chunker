@@ -69,14 +69,15 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
-            suffix=-${{ matrix.variant }},onlatest=true
           tags: |
-            # For version tags (v1.2.3), create vrelease-variant tag
-            type=ref,event=tag,prefix=v,suffix=-${{ matrix.variant }}
+            # For version tags (v1.2.3), create v1.2.3-variant tag
+            type=ref,event=tag,suffix=-${{ matrix.variant }}
             # For main branch, create latest-variant tag
             type=raw,value=latest-${{ matrix.variant }},enable={{is_default_branch}}
             # For PRs, create pr-number-variant tag
             type=ref,event=pr,suffix=-${{ matrix.variant }}
+            # Always create sha-based tags for tracking
+            type=sha,prefix={{branch}}-${{ matrix.variant }}-,format=short
       
       # Step 5: Generate build args based on variant
       - name: Set build arguments
