@@ -227,7 +227,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Text Chunker API",
     description="API for chunking text documents into smaller segments with control over token count and overlap",
-    version="0.6.1",
+    version="0.6.2",
     lifespan=lifespan,
 )
 
