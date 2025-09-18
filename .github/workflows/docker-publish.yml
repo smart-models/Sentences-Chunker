@@ -1,15 +1,10 @@
 name: Build and Publish Docker Images
 
-# Trigger workflow on push to main branch or version tags
+# Trigger workflow SOLO sui tag di versione
 on:
   push:
-    branches:
-      - main
     tags:
-      - 'v*.*.*'
-  pull_request:
-    branches:
-      - main
+      - 'v*.*.*'  # Solo sui tag di versione (es. v0.6.1, v1.2.3)
   workflow_dispatch: # Allow manual trigger
 
 env:
@@ -61,7 +56,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      # Step 4: Extract metadata for Docker
+      # Step 4: Extract metadata for Docker (SOLO tag di versione)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -70,14 +65,10 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            # For version tags (v1.2.3), create v1.2.3-variant tag
+            # Tag specifico della versione (es. v0.6.1-cpu, v0.6.1-gpu)
             type=ref,event=tag,suffix=-${{ matrix.variant }}
-            # For main branch, create latest-variant tag
-            type=raw,value=latest-${{ matrix.variant }},enable={{is_default_branch}}
-            # For PRs, create pr-number-variant tag
-            type=ref,event=pr,suffix=-${{ matrix.variant }}
-            # Always create sha-based tags for tracking
-            type=sha,prefix={{branch}}-${{ matrix.variant }}-,format=short
+            # Tag latest per ogni versione (latest-cpu, latest-gpu)
+            type=raw,value=latest-${{ matrix.variant }}
       
       # Step 5: Generate build args based on variant
       - name: Set build arguments
@@ -127,40 +118,45 @@ jobs:
           echo "📦 Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
           echo "🔖 Digest: ${{ steps.build.outputs.digest }}"
+          echo "📋 Version: ${{ github.ref_name }}"
   
   # Job to verify images after push
   verify-images:
     needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     
     permissions:
       packages: read
     
     steps:
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
       - name: Verify CPU image
         run: |
-          echo "Verifying CPU image..."
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu || true
+          echo "Verifying CPU image for version ${{ steps.version.outputs.VERSION }}..."
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-cpu
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu
       
       - name: Verify GPU image  
         run: |
-          echo "Verifying GPU image..."
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu || true
+          echo "Verifying GPU image for version ${{ steps.version.outputs.VERSION }}..."
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-gpu
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu
       
       - name: List available tags
         run: |
-          echo "📋 Available image tags:"
-          # Using GitHub API to list package versions
-          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/user/packages/container/${{ github.event.repository.name }}/versions" \
-            | jq -r '.[] | .metadata.container.tags[]' | sort -u || echo "Unable to fetch tags"
+          echo "📋 Available image tags for this release:"
+          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-cpu"
+          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-gpu"
+          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu"
+          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu"
   
-  # Job to create release notes (only on version tags)
+  # Job to create release notes
   create-release:
     needs: build-and-push
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     
     permissions:
       contents: write
@@ -204,6 +200,15 @@ jobs:
             # GPU deployment
             cd docker
             docker compose --profile gpu up -d
+            ```
+            
+            ### Quick Start
+            ```bash
+            # Run CPU version
+            docker run -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
+            
+            # Run GPU version (requires nvidia-docker)
+            docker run --gpus all -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
             ```
             
             For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
