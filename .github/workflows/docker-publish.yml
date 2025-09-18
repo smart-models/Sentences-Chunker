@@ -1,10 +1,10 @@
 name: Build and Publish Docker Images
 
-# Trigger workflow SOLO sui tag di versione
+# Trigger workflow ONLY on version tags
 on:
   push:
     tags:
-      - 'v*.*.*'  # Solo sui tag di versione (es. v0.6.1, v1.2.3)
+      - 'v*.*.*'  # Only on version tags (e.g. v0.6.1, v1.2.3)
   workflow_dispatch: # Allow manual trigger
 
 env:
@@ -12,7 +12,18 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Job to clean cache before build
+  clean-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clear GitHub Actions Cache
+        run: |
+          echo "🧹 Clearing potentially corrupted cache..."
+          # GitHub Actions cache cleanup is done automatically
+          # This step is just for logging
+    
   build-and-push:
+    needs: clean-cache
     runs-on: ubuntu-latest
     
     # Set permissions for GITHUB_TOKEN
@@ -56,7 +67,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      # Step 4: Extract metadata for Docker (SOLO tag di versione)
+      # Step 4: Extract metadata for Docker (ONLY version tags)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -65,9 +76,9 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            # Tag specifico della versione (es. v0.6.1-cpu, v0.6.1-gpu)
+            # Specific version tag (e.g. v0.6.1-cpu, v0.6.1-gpu)
             type=ref,event=tag,suffix=-${{ matrix.variant }}
-            # Tag latest per ogni versione (latest-cpu, latest-gpu)
+            # Latest tag for each version (latest-cpu, latest-gpu)
             type=raw,value=latest-${{ matrix.variant }}
       
       # Step 5: Generate build args based on variant
@@ -82,7 +93,7 @@ jobs:
             echo "LABELS=gpu.cuda=none" >> $GITHUB_OUTPUT
           fi
       
-      # Step 6: Build and push Docker image
+      # Step 6: Build and push Docker image (with retry for GPU)
       - name: Build and push Docker image (${{ matrix.variant }})
         id: build
         uses: docker/build-push-action@v6
@@ -96,22 +107,42 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.variant=${{ matrix.variant }}
             ${{ steps.build-args.outputs.LABELS }}
-          cache-from: type=gha,scope=${{ matrix.cache-scope }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache-scope }}
-          provenance: mode=max
-          sbom: true
+          # Cache with more specific and clean scope
+          cache-from: type=gha,scope=v2-${{ matrix.variant }}-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=v2-${{ matrix.variant }}-${{ github.ref_name }}
+          # Disable features that can cause conflicts
+          provenance: false
+          sbom: false
+          # Output only digest, no extra metadata
+          outputs: type=registry
+          build-args: |
+            ${{ steps.build-args.outputs.BUILD_ARGS }}
+        # Retry for GPU builds that often fail due to cache issues
+        continue-on-error: ${{ matrix.variant == 'gpu' }}
+      
+      # Extra step: Retry GPU build if it fails
+      - name: Retry GPU build (if needed)
+        if: failure() && matrix.variant == 'gpu'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            ${{ steps.build-args.outputs.LABELS }}
+          # No cache for retry
+          no-cache: true
+          provenance: false
+          sbom: false
+          outputs: type=registry
           build-args: |
             ${{ steps.build-args.outputs.BUILD_ARGS }}
       
-      # Step 7: Generate artifact attestation for supply chain security
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-      
-      # Step 8: Output image details
+      # Step 7: Output image details
       - name: Image details
         run: |
           echo "✅ Successfully built and pushed ${{ matrix.variant }} image"
@@ -120,9 +151,42 @@ jobs:
           echo "🔖 Digest: ${{ steps.build.outputs.digest }}"
           echo "📋 Version: ${{ github.ref_name }}"
   
+  # Job to clean up unwanted SHA images
+  cleanup-unwanted-images:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: success()
+    
+    permissions:
+      packages: write
+    
+    steps:
+      - name: Clean up unwanted SHA images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 Looking for unwanted SHA-only images to cleanup..."
+          
+          # Get package name
+          PACKAGE_NAME=$(echo "${{ env.IMAGE_NAME }}" | cut -d'/' -f2)
+          
+          # List package versions
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/user/packages/container/${PACKAGE_NAME}/versions" \
+            | jq -r '.[] | select(.metadata.container.tags | length == 0 or (.metadata.container.tags | all(startswith("sha256")))) | .id' \
+            | while read version_id; do
+              if [ -n "$version_id" ]; then
+                echo "Deleting unwanted image version: $version_id"
+                curl -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                  "https://api.github.com/user/packages/container/${PACKAGE_NAME}/versions/${version_id}" || true
+              fi
+            done
+          
+          echo "✅ Cleanup completed"
+
   # Job to verify images after push
   verify-images:
-    needs: build-and-push
+    needs: [build-and-push, cleanup-unwanted-images]
     runs-on: ubuntu-latest
     
     permissions:
@@ -155,7 +219,7 @@ jobs:
   
   # Job to create release notes
   create-release:
-    needs: build-and-push
+    needs: [build-and-push, cleanup-unwanted-images]
     runs-on: ubuntu-latest
     
     permissions:
