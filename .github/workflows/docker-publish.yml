@@ -67,12 +67,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      # Step 4: Extract metadata for Docker (ONLY version tags)
+      # Step 4: Prepare lowercase image name for Docker compatibility
+      - name: Prepare lowercase image name
+        id: image-name
+        run: |
+          # Convert to lowercase to ensure Docker compatibility
+          LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "📝 Using lowercase image name: ${LOWERCASE_IMAGE_NAME}"
+      
+      # Step 5: Extract metadata for Docker (ONLY version tags)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}
           flavor: |
             latest=false
           tags: |
@@ -81,7 +90,7 @@ jobs:
             # Latest tag for each version (latest-cpu, latest-gpu)
             type=raw,value=latest-${{ matrix.variant }}
       
-      # Step 5: Generate build args based on variant
+      # Step 6: Generate build args based on variant
       - name: Set build arguments
         id: build-args
         run: |
@@ -93,7 +102,7 @@ jobs:
             echo "LABELS=gpu.cuda=none" >> $GITHUB_OUTPUT
           fi
       
-      # Step 6: Build and push Docker image (with retry for GPU)
+      # Step 7: Build and push Docker image (with retry for GPU)
       - name: Build and push Docker image (${{ matrix.variant }})
         id: build
         uses: docker/build-push-action@v6
@@ -142,11 +151,11 @@ jobs:
           build-args: |
             ${{ steps.build-args.outputs.BUILD_ARGS }}
       
-      # Step 7: Output image details
+      # Step 8: Output image details
       - name: Image details
         run: |
           echo "✅ Successfully built and pushed ${{ matrix.variant }} image"
-          echo "📦 Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "📦 Image: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
           echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
           echo "🔖 Digest: ${{ steps.build.outputs.digest }}"
           echo "📋 Version: ${{ github.ref_name }}"
@@ -167,8 +176,8 @@ jobs:
         run: |
           echo "🧹 Looking for unwanted SHA-only images to cleanup..."
           
-          # Get package name
-          PACKAGE_NAME=$(echo "${{ env.IMAGE_NAME }}" | cut -d'/' -f2)
+          # Get package name (convert to lowercase)
+          PACKAGE_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
           
           # List package versions
           curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -197,25 +206,32 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
+      - name: Prepare lowercase image name
+        id: image-name
+        run: |
+          # Convert to lowercase for Docker compatibility
+          LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
+      
       - name: Verify CPU image
         run: |
           echo "Verifying CPU image for version ${{ steps.version.outputs.VERSION }}..."
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-cpu
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu
       
       - name: Verify GPU image  
         run: |
           echo "Verifying GPU image for version ${{ steps.version.outputs.VERSION }}..."
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-gpu
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu
       
       - name: List available tags
         run: |
           echo "📋 Available image tags for this release:"
-          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-cpu"
-          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}-gpu"
-          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-cpu"
-          echo "- ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-gpu"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu"
   
   # Job to create release notes
   create-release:
