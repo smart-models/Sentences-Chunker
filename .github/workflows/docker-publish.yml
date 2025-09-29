@@ -35,14 +35,15 @@ jobs:
     
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - variant: cpu
-            dockerfile: docker/dockerfile
+            dockerfile: docker/Dockerfile.cpu
             platforms: linux/amd64
             cache-scope: cpu
           - variant: gpu  
-            dockerfile: docker/dockerfile
+            dockerfile: docker/Dockerfile.gpu
             platforms: linux/amd64
             cache-scope: gpu
     
