@@ -39,11 +39,11 @@ jobs:
       matrix:
         include:
           - variant: cpu
-            dockerfile: docker/Dockerfile.cpu
+            dockerfile: docker/dockerfile
             platforms: linux/amd64
             cache-scope: cpu
           - variant: gpu  
-            dockerfile: docker/Dockerfile.gpu
+            dockerfile: docker/dockerfile
             platforms: linux/amd64
             cache-scope: gpu
     

@@ -24,7 +24,6 @@ RUN python -m pip install --upgrade pip
 WORKDIR /app
 
 # Copy only requirements first to leverage cache
-# --- Path Correction: Specify the path relative to the build context ---
 COPY docker/requirements.txt .
 
 # Install Python dependencies into the virtual environment
