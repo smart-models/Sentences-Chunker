@@ -47,16 +47,46 @@ jobs:
             cache-scope: gpu
     
     steps:
-      # Step 0: Free up disk space
+      # Step 0a: Maximize build space using action
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+      
+      # Step 0b: Free up disk space (AGGRESSIVE)
       - name: Free up disk space
         run: |
-          echo "🧹 Freeing up disk space..."
+          echo "🧹 Freeing up disk space (aggressive mode)..."
           df -h
+          
+          # Remove large packages
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/boost
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # Clean apt cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          
+          # Docker cleanup
           sudo docker system prune -af --volumes
+          
+          # Remove swap
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          
+          echo "📊 Disk space after cleanup:"
           df -h
           echo "✅ Disk space cleanup completed"
       
