@@ -9,7 +9,7 @@ import pickle
 from pathlib import Path
 from enum import Enum
 from typing import Dict, List, Any, Optional
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
@@ -171,6 +171,48 @@ class FileChunkingResult(BaseModel):
     )
 
 
+class SplitSentencesInput(BaseModel):
+    """Input parameters for split sentences endpoint."""
+    model_name: SaTModelName = Field(
+        default=DEFAULT_SAT_MODEL_NAME,
+        description="The SaT model to use for sentence segmentation"
+    )
+    split_threshold: float = Field(
+        default=DEFAULT_SAT_SPLIT_THRESHOLD,
+        description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
+        ge=0.0,
+        le=1.0
+    )
+
+
+class FileChunkerInput(BaseModel):
+    """Input parameters for file chunking endpoint."""
+    model_name: SaTModelName = Field(
+        default=DEFAULT_SAT_MODEL_NAME,
+        description="The SaT model to use for sentence segmentation"
+    )
+    split_threshold: float = Field(
+        default=DEFAULT_SAT_SPLIT_THRESHOLD,
+        description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
+        ge=0.0,
+        le=1.0
+    )
+    max_chunk_tokens: int = Field(
+        default=500,
+        description="Maximum number of tokens per final chunk",
+        gt=0
+    )
+    overlap_sentences: int = Field(
+        default=1,
+        description="Number of sentences to overlap between consecutive chunks",
+        ge=0
+    )
+    strict_mode: bool = Field(
+        default=False,
+        description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits"
+    )
+
+
 # Create a singleton for model caching with expiration
 _model_cache = {}
 _model_last_used = {}
@@ -227,7 +269,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Text Chunker API",
     description="API for chunking text documents into smaller segments with control over token count and overlap",
-    version="0.6.4",
+    version="0.6.5",
     lifespan=lifespan,
 )
 
@@ -881,16 +923,7 @@ async def split_sentences_endpoint(
     file: UploadFile = File(
         ..., description="Text file (.txt or .md) to split into sentences"
     ),
-    model_name: SaTModelName = Query(
-        DEFAULT_SAT_MODEL_NAME,
-        description="The SaT model to use for sentence segmentation",
-    ),
-    split_threshold: float = Query(
-        DEFAULT_SAT_SPLIT_THRESHOLD,
-        description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
-        ge=0.0,
-        le=1.0,
-    ),
+    input_data: SplitSentencesInput = Depends(),
 ):
     """Split text file into sentences using WTPSplit's advanced segmentation.
 
@@ -921,7 +954,7 @@ async def split_sentences_endpoint(
         # Split the text into sentences
         sentences = await run_in_threadpool(
             lambda: split_sentences_NLP(
-                text, model_name=model_name, split_threshold=split_threshold
+                text, model_name=input_data.model_name, split_threshold=input_data.split_threshold
             )
         )
 
@@ -952,8 +985,8 @@ async def split_sentences_endpoint(
             avg_tokens_per_sentence=int(total_tokens / len(chunks)) if chunks else 0,
             max_tokens_in_sentence=max_tokens,
             min_tokens_in_sentence=min_tokens,
-            sat_model_name=model_name,
-            split_threshold=split_threshold,
+            sat_model_name=input_data.model_name,
+            split_threshold=input_data.split_threshold,
             source=file.filename,
             processing_time=round(processing_time, 4),
         )
@@ -976,26 +1009,7 @@ async def split_sentences_endpoint(
 @app.post("/file-chunker/", response_model=FileChunkingResult, tags=["Chunking"])
 async def file_chunker_endpoint(
     file: UploadFile = File(..., description="Text file (.txt or .md) to chunk"),
-    model_name: SaTModelName = Query(
-        DEFAULT_SAT_MODEL_NAME,
-        description="The SaT model to use for initial sentence segmentation",
-    ),
-    split_threshold: float = Query(
-        DEFAULT_SAT_SPLIT_THRESHOLD,
-        description="Threshold for SaT sentence splitting (confidence for boundaries)",
-        ge=0.0,
-        le=1.0,
-    ),
-    max_chunk_tokens: int = Query(
-        500, description="Maximum number of tokens per final chunk", gt=0
-    ),
-    overlap_sentences: int = Query(
-        1, description="Number of sentences to overlap between consecutive chunks", ge=0
-    ),
-    strict_mode: bool = Query(
-        False,
-        description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits.",
-    ),
+    input_data: FileChunkerInput = Depends(),
 ):
     """Split text into token-limited chunks with optional sentence overlap.
 
@@ -1019,9 +1033,9 @@ async def file_chunker_endpoint(
     """
     start_time = time.time()
     logger.info(
-        f"Processing file {file.filename} with model={model_name.value}, "
-        f"threshold={split_threshold}, max_tokens={max_chunk_tokens}, "
-        f"overlap={overlap_sentences}, strict_mode={strict_mode}"
+        f"Processing file {file.filename} with model={input_data.model_name.value}, "
+        f"threshold={input_data.split_threshold}, max_tokens={input_data.max_chunk_tokens}, "
+        f"overlap={input_data.overlap_sentences}, strict_mode={input_data.strict_mode}"
     )
 
     # Validate file type
@@ -1040,16 +1054,16 @@ async def file_chunker_endpoint(
         # Split into sentences using SaT
         sentences = await run_in_threadpool(
             lambda: split_sentences_NLP(
-                text, model_name=model_name, split_threshold=split_threshold
+                text, model_name=input_data.model_name, split_threshold=input_data.split_threshold
             )
         )
 
         if not sentences:
             # Handle empty input
             metadata = FileChunkingMetadata(
-                split_threshold=split_threshold,
-                configured_max_chunk_tokens=max_chunk_tokens,
-                configured_overlap_sentences=overlap_sentences,
+                split_threshold=input_data.split_threshold,
+                configured_max_chunk_tokens=input_data.max_chunk_tokens,
+                configured_overlap_sentences=input_data.overlap_sentences,
                 n_input_sentences=0,
                 avg_tokens_per_input_sentence=0,
                 max_tokens_in_input_sentence=0,
@@ -1058,7 +1072,7 @@ async def file_chunker_endpoint(
                 avg_tokens_per_chunk=0,
                 max_tokens_in_chunk=0,
                 min_tokens_in_chunk=0,
-                sat_model_name=model_name,
+                sat_model_name=input_data.model_name,
                 source=file.filename,
                 processing_time=round(time.time() - start_time, 4),
             )
@@ -1087,7 +1101,7 @@ async def file_chunker_endpoint(
         # Group sentences into chunks
         try:
             chunks_data = await _chunk_sentences_by_token_limit(
-                sentences_data, max_chunk_tokens, overlap_sentences, strict_mode
+                sentences_data, input_data.max_chunk_tokens, input_data.overlap_sentences, input_data.strict_mode
             )
         except StrictChunkingError as e:
             logger.warning(f"Strict mode chunking failed for {file.filename}: {str(e)}")
@@ -1142,9 +1156,9 @@ async def file_chunker_endpoint(
 
         # Create metadata
         metadata = FileChunkingMetadata(
-            split_threshold=split_threshold,
-            configured_max_chunk_tokens=max_chunk_tokens,
-            configured_overlap_sentences=overlap_sentences,
+            split_threshold=input_data.split_threshold,
+            configured_max_chunk_tokens=input_data.max_chunk_tokens,
+            configured_overlap_sentences=input_data.overlap_sentences,
             n_input_sentences=len(sentences_data),
             avg_tokens_per_input_sentence=avg_input_tokens,
             max_tokens_in_input_sentence=max_input_tokens,
@@ -1153,7 +1167,7 @@ async def file_chunker_endpoint(
             avg_tokens_per_chunk=avg_output_tokens,
             max_tokens_in_chunk=max_output_tokens,
             min_tokens_in_chunk=min_output_tokens,
-            sat_model_name=model_name,
+            sat_model_name=input_data.model_name,
             source=file.filename,
             processing_time=round(time.time() - start_time, 4),
         )
