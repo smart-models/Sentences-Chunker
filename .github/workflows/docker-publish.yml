@@ -47,6 +47,19 @@ jobs:
             cache-scope: gpu
     
     steps:
+      # Step 0: Free up disk space
+      - name: Free up disk space
+        run: |
+          echo "🧹 Freeing up disk space..."
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker system prune -af --volumes
+          df -h
+          echo "✅ Disk space cleanup completed"
+      
       # Step 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -116,9 +129,8 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.variant=${{ matrix.variant }}
             ${{ steps.build-args.outputs.LABELS }}
-          # Cache with more specific and clean scope
-          cache-from: type=gha,scope=v2-${{ matrix.variant }}-${{ github.ref_name }}
-          cache-to: type=gha,mode=max,scope=v2-${{ matrix.variant }}-${{ github.ref_name }}
+          # Disable cache temporarily to avoid disk space issues
+          no-cache: true
           # Disable features that can cause conflicts
           provenance: false
           sbom: false
