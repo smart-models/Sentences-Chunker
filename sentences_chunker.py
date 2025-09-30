@@ -16,11 +16,15 @@ from contextlib import asynccontextmanager
 
 # Valid SaT model names
 VALID_SAT_MODELS = {
-    "sat-1l", "sat-1l-sm",
-    "sat-3l", "sat-3l-sm",
-    "sat-6l", "sat-6l-sm",
+    "sat-1l",
+    "sat-1l-sm",
+    "sat-3l",
+    "sat-3l-sm",
+    "sat-6l",
+    "sat-6l-sm",
     "sat-9l",
-    "sat-12l", "sat-12l-sm"
+    "sat-12l",
+    "sat-12l-sm",
 }
 
 # Configure logging
@@ -156,43 +160,43 @@ class FileChunkingResult(BaseModel):
 
 class SplitSentencesInput(BaseModel):
     """Input parameters for split sentences endpoint."""
+
     model_name: str = Field(
         default=DEFAULT_SAT_MODEL_NAME,
-        description="The SaT model to use for sentence segmentation"
+        description="The SaT model to use for sentence segmentation",
     )
     split_threshold: float = Field(
         default=DEFAULT_SAT_SPLIT_THRESHOLD,
         description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
         ge=0.0,
-        le=1.0
+        le=1.0,
     )
 
 
 class FileChunkerInput(BaseModel):
     """Input parameters for file chunking endpoint."""
+
     model_name: str = Field(
         default=DEFAULT_SAT_MODEL_NAME,
-        description="The SaT model to use for sentence segmentation"
+        description="The SaT model to use for sentence segmentation",
     )
     split_threshold: float = Field(
         default=DEFAULT_SAT_SPLIT_THRESHOLD,
         description="Threshold value for sentence splitting (confidence score for sentence boundaries)",
         ge=0.0,
-        le=1.0
+        le=1.0,
     )
     max_chunk_tokens: int = Field(
-        default=500,
-        description="Maximum number of tokens per final chunk",
-        gt=0
+        default=500, description="Maximum number of tokens per final chunk", gt=0
     )
     overlap_sentences: int = Field(
         default=1,
         description="Number of sentences to overlap between consecutive chunks",
-        ge=0
+        ge=0,
     )
     strict_mode: bool = Field(
         default=False,
-        description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits"
+        description="If True, an error is returned if any chunk cannot strictly adhere to token/overlap limits",
     )
 
 
@@ -252,7 +256,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Text Chunker API",
     description="API for chunking text documents into smaller segments with control over token count and overlap",
-    version="0.6.5",
+    version="0.6.6",
     lifespan=lifespan,
 )
 
@@ -887,12 +891,6 @@ async def health_check():
     Returns:
         dict: API status info with health status, version, GPU availability, and models
     """
-    # Check for saved models
-    # models_dir = Path("models")
-    # saved_models = []
-    # if models_dir.exists():
-    #     saved_models = [f.stem for f in models_dir.glob("*.pkl")]
-
     return {
         "status": "healthy",
         "version": app.version,
@@ -923,7 +921,7 @@ async def split_sentences_endpoint(
     if input_data.model_name not in VALID_SAT_MODELS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}"
+            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}",
         )
 
     # Validate file type
@@ -944,7 +942,9 @@ async def split_sentences_endpoint(
         # Split the text into sentences
         sentences = await run_in_threadpool(
             lambda: split_sentences_NLP(
-                text, model_name=input_data.model_name, split_threshold=input_data.split_threshold
+                text,
+                model_name=input_data.model_name,
+                split_threshold=input_data.split_threshold,
             )
         )
 
@@ -1022,14 +1022,14 @@ async def file_chunker_endpoint(
         HTTPException (500): For unexpected server errors
     """
     start_time = time.time()
-    
+
     # Validate model_name
     if input_data.model_name not in VALID_SAT_MODELS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}"
+            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}",
         )
-    
+
     logger.info(
         f"Processing file {file.filename} with model={input_data.model_name}, "
         f"threshold={input_data.split_threshold}, max_tokens={input_data.max_chunk_tokens}, "
@@ -1052,7 +1052,9 @@ async def file_chunker_endpoint(
         # Split into sentences using SaT
         sentences = await run_in_threadpool(
             lambda: split_sentences_NLP(
-                text, model_name=input_data.model_name, split_threshold=input_data.split_threshold
+                text,
+                model_name=input_data.model_name,
+                split_threshold=input_data.split_threshold,
             )
         )
 
@@ -1099,7 +1101,10 @@ async def file_chunker_endpoint(
         # Group sentences into chunks
         try:
             chunks_data = await _chunk_sentences_by_token_limit(
-                sentences_data, input_data.max_chunk_tokens, input_data.overlap_sentences, input_data.strict_mode
+                sentences_data,
+                input_data.max_chunk_tokens,
+                input_data.overlap_sentences,
+                input_data.strict_mode,
             )
         except StrictChunkingError as e:
             logger.warning(f"Strict mode chunking failed for {file.filename}: {str(e)}")
