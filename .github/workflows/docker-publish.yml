@@ -173,6 +173,27 @@ jobs:
           echo "📊 Docker images:"
           docker images
       
+      # Step 5c: Prepare CPU-optimized requirements.txt
+      - name: Prepare CPU-optimized requirements.txt
+        run: |
+          echo "📝 Modifying requirements.txt for CPU build..."
+          cd docker
+          
+          # Backup original requirements
+          cp requirements.txt requirements.txt.backup
+          
+          # Remove CUDA-specific PyTorch index URL
+          sed -i '/--extra-index-url.*download\.pytorch\.org.*cu126/d' requirements.txt
+          
+          # Replace CUDA PyTorch with CPU-only version
+          sed -i 's/torch==2\.6\.0+cu126/torch==2.6.0/' requirements.txt
+          
+          echo "✅ CPU-optimized requirements.txt created:"
+          cat requirements.txt
+          echo ""
+          echo "📊 estimated disk space savings: ~2-3GB (no CUDA wheel download)"
+          echo "💾 Original requirements backed up as requirements.txt.backup"
+      
       # Step 6: Build and push CPU Docker image with CACHE
       - name: Build and push CPU Docker image
         id: build-cpu
@@ -363,6 +384,16 @@ jobs:
           df -h
           echo "📊 Docker images:"
           docker images
+      
+      # Step 5c: Verify GPU requirements (for logging)
+      - name: Verify GPU requirements.txt
+        run: |
+          echo "📝 Using CUDA-enabled requirements for GPU build..."
+          cd docker
+          echo "✅ GPU requirements.txt:"
+          cat requirements.txt
+          echo ""
+          echo "🔧 CUDA torch wheel will be downloaded from PyTorch repository"
       
       # Step 6: Build and push GPU Docker image with CACHE
       - name: Build and push GPU Docker image
