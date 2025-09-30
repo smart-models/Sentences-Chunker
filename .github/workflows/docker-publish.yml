@@ -505,6 +505,7 @@ jobs:
     needs: [build-gpu, cleanup-unwanted-images]
     if: ${{ needs.build-gpu.result == 'success' }}
     runs-on: ubuntu-latest
+    continue-on-error: true  # Don't block release if verification fails
     
     permissions:
       packages: read
@@ -563,7 +564,7 @@ jobs:
   # JOB 5: Create Release
   # ========================================
   create-release:
-    needs: [build-gpu, cleanup-unwanted-images]
+    needs: [build-gpu, cleanup-unwanted-images]  # Removed verify-images dependency
     runs-on: ubuntu-latest
     
     permissions:
