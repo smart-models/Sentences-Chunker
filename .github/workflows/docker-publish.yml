@@ -28,6 +28,7 @@ jobs:
   build-cpu:
     needs: clean-cache
     runs-on: ubuntu-latest
+    if: false  # Disabled: build only GPU image for now
     
     # Set permissions for GITHUB_TOKEN
     permissions:
@@ -238,7 +239,6 @@ jobs:
   # JOB 2: Build GPU Image (NUOVO RUNNER PULITO)
   # ========================================
   build-gpu:
-    needs: build-cpu  # ✅ Aspetta che CPU finisca
     runs-on: ubuntu-latest  # ✅ NUOVO RUNNER = SPAZIO FRESCO
     
     # Set permissions for GITHUB_TOKEN
@@ -462,13 +462,12 @@ jobs:
           echo "🔖 Digest: ${{ steps.build-gpu.outputs.digest }}"
           echo "📋 Version: ${{ github.ref_name }}"
           echo "📊 Final disk usage:"
-          df -h
   
   # ========================================
   # JOB 3: Cleanup Unwanted Images
   # ========================================
   cleanup-unwanted-images:
-    needs: [build-cpu, build-gpu]  # ✅ Aspetta entrambi i build
+    needs: [build-gpu]  # Build only GPU image
     runs-on: ubuntu-latest
     if: success()
     
@@ -500,10 +499,10 @@ jobs:
           echo "✅ Cleanup completed"
 
   # ========================================
-  # JOB 4: Verify Images
+  # JOB 4: Verify Images (GPU only)
   # ========================================
   verify-images:
-    needs: [build-cpu, build-gpu, cleanup-unwanted-images]
+    needs: [build-gpu, cleanup-unwanted-images]
     runs-on: ubuntu-latest
     
     permissions:
@@ -521,12 +520,6 @@ jobs:
           LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
       
-      - name: Verify CPU image
-        run: |
-          echo "Verifying CPU image for version ${{ steps.version.outputs.VERSION }}..."
-          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu
-          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu
-      
       - name: Verify GPU image  
         run: |
           echo "Verifying GPU image for version ${{ steps.version.outputs.VERSION }}..."
@@ -535,17 +528,15 @@ jobs:
       
       - name: List available tags
         run: |
-          echo "📋 Available image tags for this release:"
-          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu"
+          echo "Available image tags for this release: "
           echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu"
-          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu"
           echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu"
   
   # ========================================
   # JOB 5: Create Release
   # ========================================
   create-release:
-    needs: [build-cpu, build-gpu, cleanup-unwanted-images]
+    needs: [build-gpu, cleanup-unwanted-images]
     runs-on: ubuntu-latest
     
     permissions:
@@ -558,24 +549,18 @@ jobs:
       - name: Extract version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: Release ${{ steps.version.outputs.VERSION }}
           body: |
-            ## 🚀 Docker Images Published
+            ## Docker Images Published
             
-            This release includes Docker images for both CPU and GPU variants:
+            This release includes the GPU image (CUDA 12.1):
             
-            ### CPU Image
-            ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
-            docker pull ghcr.io/${{ github.repository }}:latest-cpu
-            ```
-            
-            ### GPU Image (CUDA 12.1)
+            ### GPU Image
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
             docker pull ghcr.io/${{ github.repository }}:latest-gpu
@@ -583,10 +568,6 @@ jobs:
             
             ### Docker Compose
             ```bash
-            # CPU deployment
-            cd docker
-            docker compose --profile cpu up -d
-            
             # GPU deployment
             cd docker
             docker compose --profile gpu up -d
@@ -594,21 +575,18 @@ jobs:
             
             ### Quick Start
             ```bash
-            # Run CPU version
-            docker run -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
-            
             # Run GPU version (requires nvidia-docker)
             docker run --gpus all -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
             ```
             
-            ## 🎯 Improvements in This Version
+            ## Improvements in This Version
             
-            - ✅ Ultra-aggressive disk space optimization
-            - ✅ Docker moved to /mnt partition (70GB extra)
-            - ✅ Optimized build process with registry cache
-            - ✅ Separate build jobs for maximum disk space
-            - ✅ ~50% faster subsequent builds
-            - ✅ 99%+ reliable builds
+            - Ultra-aggressive disk space optimization
+            - Docker moved to /mnt partition (70GB extra)
+            - Optimized build process with registry cache
+            - Focused GPU-only build to reduce space usage
+            - ~50% faster subsequent builds
+            - 99%+ reliable builds
             
             For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
           draft: false
