@@ -503,6 +503,7 @@ jobs:
   # ========================================
   verify-images:
     needs: [build-gpu, cleanup-unwanted-images]
+    if: ${{ needs.build-gpu.result == 'success' }}
     runs-on: ubuntu-latest
     
     permissions:
@@ -513,6 +514,9 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Prepare lowercase image name
         id: image-name
         run: |
@@ -520,11 +524,34 @@ jobs:
           LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
       
-      - name: Verify GPU image  
+      - name: Verify GPU image (with retry)
         run: |
-          echo "Verifying GPU image for version ${{ steps.version.outputs.VERSION }}..."
-          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu
-          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu
+          set -e
+          IMAGE="${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TAG1="$IMAGE:$VERSION-gpu"
+          TAG2="$IMAGE:latest-gpu"
+          echo "Verifying GPU image tags: $TAG1 and $TAG2"
+
+          for tag in "$TAG1" "$TAG2"; do
+            echo "Checking availability for $tag"
+            FOUND=0
+            for i in $(seq 1 12); do
+              if docker buildx imagetools inspect "$tag" > /dev/null 2>&1; then
+                echo "Found manifest for $tag"
+                FOUND=1
+                break
+              fi
+              echo "Manifest not ready for $tag (attempt $i/12). Waiting 20s..."
+              sleep 20
+            done
+            if [ "$FOUND" -ne 1 ]; then
+              echo "Manifest still not available for $tag after waiting. Failing."
+              exit 1
+            fi
+            echo "Pulling $tag"
+            docker pull "$tag"
+          done
       
       - name: List available tags
         run: |
