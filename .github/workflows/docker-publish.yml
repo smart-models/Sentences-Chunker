@@ -22,13 +22,9 @@ jobs:
           # GitHub Actions cache cleanup is done automatically
           # This step is just for logging
     
-  # ========================================
-  # JOB 1: Build CPU Image (NUOVO RUNNER)
-  # ========================================
-  build-cpu:
+  build-and-push:
     needs: clean-cache
     runs-on: ubuntu-latest
-    if: false  # Disabled: build only GPU image for now
     
     # Set permissions for GITHUB_TOKEN
     permissions:
@@ -37,94 +33,32 @@ jobs:
       attestations: write
       id-token: write
     
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            dockerfile: docker/dockerfile
+            platforms: linux/amd64
+            cache-scope: cpu
+          - variant: gpu  
+            dockerfile: docker/dockerfile
+            platforms: linux/amd64
+            cache-scope: gpu
+    
     steps:
-      # Step 0a: Maximize build space using action
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048  # ✅ AUMENTATO a 2GB per Docker
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-      
-      # Step 0b: Free up disk space (ULTRA-AGGRESSIVE)
-      - name: Ultra-aggressive disk cleanup
+      # Step 0: Free up disk space
+      - name: Free up disk space
         run: |
-          echo "🧹 ULTRA-AGGRESSIVE disk cleanup starting..."
+          echo "🧹 Freeing up disk space..."
           df -h
-          
-          # Remove large packages
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/boost
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # ✅ NUOVO: Remove additional large directories
-          sudo rm -rf /usr/lib/jvm/*
-          sudo rm -rf /usr/share/doc/*
-          sudo rm -rf /usr/share/man/*
-          sudo rm -rf /var/cache/*
-          sudo rm -rf /var/log/*
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          
-          # Remove browsers and unnecessary software
-          sudo apt-get purge -y '^firefox.*' '^google-chrome.*' '^dotnet.*' '^aspnetcore.*' || true
-          sudo apt-get autoremove -y
-          
-          # Clean apt cache
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          
-          # Docker cleanup
           sudo docker system prune -af --volumes
-          sudo docker image prune -af
-          
-          # Remove swap
-          sudo swapoff -a
-          sudo rm -f /mnt/swapfile
-          
-          echo "📊 Disk space after ultra-aggressive cleanup:"
           df -h
-          echo "✅ Ultra-aggressive cleanup completed"
-      
-      # Step 0c: Move Docker to /mnt (70GB extra space)
-      - name: Move Docker to /mnt partition
-        run: |
-          echo "📦 Moving Docker to /mnt (70GB available)..."
-          df -h
-          
-          # Stop Docker
-          sudo systemctl stop docker
-          
-          # Create directory on /mnt
-          sudo mkdir -p /mnt/docker-tmp
-          
-          # Move Docker data if exists
-          if [ -d "/var/lib/docker" ]; then
-            echo "Moving existing Docker data..."
-            sudo rsync -a /var/lib/docker/ /mnt/docker-tmp/
-            sudo rm -rf /var/lib/docker
-          fi
-          
-          # Create symlink
-          sudo ln -s /mnt/docker-tmp /var/lib/docker
-          
-          # Start Docker
-          sudo systemctl start docker
-          
-          echo "✅ Docker successfully moved to /mnt"
-          echo "📊 Available space on /mnt:"
-          df -h /mnt
-          echo "📊 Docker root dir:"
-          docker info | grep "Docker Root Dir"
+          echo "✅ Disk space cleanup completed"
       
       # Step 1: Checkout repository
       - name: Checkout repository
@@ -133,7 +67,10 @@ jobs:
       # Step 2: Set up Docker Buildx for advanced features
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        # Default configuration is optimal for most cases
+        with:
+          driver-opts: |
+            network=host
+            image=moby/buildkit:latest
       
       # Step 3: Log in to GitHub Container Registry
       - name: Log in to GitHub Container Registry
@@ -161,313 +98,83 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            # Specific version tag (e.g. v0.6.1-cpu)
-            type=ref,event=tag,suffix=-cpu
-            # Latest tag for CPU version
-            type=raw,value=latest-cpu
+            # Specific version tag (e.g. v0.6.1-cpu, v0.6.1-gpu)
+            type=ref,event=tag,suffix=-${{ matrix.variant }}
+            # Latest tag for each version (latest-cpu, latest-gpu)
+            type=raw,value=latest-${{ matrix.variant }}
       
-      # Step 5b: Check available space before build
-      - name: Check disk space before build
+      # Step 6: Generate build args based on variant
+      - name: Set build arguments
+        id: build-args
         run: |
-          echo "📊 Disk space before Docker build:"
-          df -h
-          echo "📊 Docker images:"
-          docker images
-      
-      # Step 5c: Prepare CPU-optimized requirements.txt
-      - name: Prepare CPU-optimized requirements.txt
-        run: |
-          echo "📝 Modifying requirements.txt for CPU build..."
-          cd docker
-          
-          # Backup original requirements
-          cp requirements.txt requirements.txt.backup
-          
-          # Remove CUDA-specific PyTorch index URL
-          sed -i '/--extra-index-url.*download\.pytorch\.org.*cu126/d' requirements.txt
-          
-          # Replace CUDA PyTorch with CPU-only version
-          sed -i 's/torch==2\.6\.0+cu126/torch==2.6.0/' requirements.txt
-          
-          echo "✅ CPU-optimized requirements.txt created:"
-          cat requirements.txt
-          echo ""
-          echo "📊 estimated disk space savings: ~2-3GB (no CUDA wheel download)"
-          echo "💾 Original requirements backed up as requirements.txt.backup"
-      
-      # Step 6: Build and push CPU Docker image with CACHE
-      - name: Build and push CPU Docker image
-        id: build-cpu
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.variant=cpu
-            gpu.cuda=none
-          
-          # ✅ CACHE REGISTRY CONFIGURATION
-          cache-from: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-cpu
-          cache-to: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-cpu,mode=max
-          
-          # Build arguments
-          build-args: |
-            ENABLE_GPU=false
-          
-          # Disable features that can cause conflicts
-          provenance: false
-          sbom: false
-          # Output only digest, no extra metadata
-          outputs: type=registry
-      
-      # Step 7: Output image details
-      - name: CPU Image details
-        run: |
-          echo "✅ Successfully built and pushed CPU image"
-          echo "📦 Image: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
-          echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
-          echo "🔖 Digest: ${{ steps.build-cpu.outputs.digest }}"
-          echo "📋 Version: ${{ github.ref_name }}"
-          echo "📊 Final disk usage:"
-          df -h
-  
-  # ========================================
-  # JOB 2: Build GPU Image (NUOVO RUNNER PULITO)
-  # ========================================
-  build-gpu:
-    runs-on: ubuntu-latest  # ✅ NUOVO RUNNER = SPAZIO FRESCO
-    
-    # Set permissions for GITHUB_TOKEN
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    
-    steps:
-      # Step 0a: Maximize build space using action
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048  # ✅ AUMENTATO a 2GB per Docker
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-      
-      # Step 0b: Free up disk space (ULTRA-AGGRESSIVE)
-      - name: Ultra-aggressive disk cleanup
-        run: |
-          echo "🧹 ULTRA-AGGRESSIVE disk cleanup starting..."
-          df -h
-          
-          # Remove large packages
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # ✅ NUOVO: Remove additional large directories
-          sudo rm -rf /usr/lib/jvm/*
-          sudo rm -rf /usr/share/doc/*
-          sudo rm -rf /usr/share/man/*
-          sudo rm -rf /var/cache/*
-          sudo rm -rf /var/log/*
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          
-          # Remove browsers and unnecessary software
-          sudo apt-get purge -y '^firefox.*' '^google-chrome.*' '^dotnet.*' '^aspnetcore.*' || true
-          sudo apt-get autoremove -y
-          
-          # Clean apt cache
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          
-          # Docker cleanup
-          sudo docker system prune -af --volumes
-          sudo docker image prune -af
-          
-          # Remove swap
-          sudo swapoff -a
-          sudo rm -f /mnt/swapfile
-          
-          echo "📊 Disk space after ultra-aggressive cleanup:"
-          df -h
-          echo "✅ Ultra-aggressive cleanup completed"
-      
-      # Step 0c: Move Docker to /mnt (70GB extra space)
-      - name: Move Docker to /mnt partition
-        run: |
-          echo "📦 Moving Docker to /mnt (70GB available)..."
-          df -h
-          
-          # Stop Docker
-          sudo systemctl stop docker
-          
-          # Create directory on /mnt
-          sudo mkdir -p /mnt/docker-tmp
-          
-          # Move Docker data if exists
-          if [ -d "/var/lib/docker" ]; then
-            echo "Moving existing Docker data..."
-            sudo rsync -a /var/lib/docker/ /mnt/docker-tmp/
-            sudo rm -rf /var/lib/docker
+          if [ "${{ matrix.variant }}" = "gpu" ]; then
+            echo "BUILD_ARGS=ENABLE_GPU=true" >> $GITHUB_OUTPUT
+            echo "LABELS=gpu.cuda=12.1.0" >> $GITHUB_OUTPUT
+          else
+            echo "BUILD_ARGS=ENABLE_GPU=false" >> $GITHUB_OUTPUT
+            echo "LABELS=gpu.cuda=none" >> $GITHUB_OUTPUT
           fi
-          
-          # Create symlink
-          sudo ln -s /mnt/docker-tmp /var/lib/docker
-          
-          # Start Docker
-          sudo systemctl start docker
-          
-          echo "✅ Docker successfully moved to /mnt"
-          echo "📊 Available space on /mnt:"
-          df -h /mnt
-          echo "📊 Docker root dir:"
-          docker info | grep "Docker Root Dir"
       
-      # Step 1: Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      # Step 2: Set up Docker Buildx for advanced features
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        # Default configuration is optimal for most cases
-      
-      # Step 3: Log in to GitHub Container Registry
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      # Step 4: Prepare lowercase image name for Docker compatibility
-      - name: Prepare lowercase image name
-        id: image-name
-        run: |
-          # Convert to lowercase to ensure Docker compatibility
-          LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "📝 Using lowercase image name: ${LOWERCASE_IMAGE_NAME}"
-      
-      # Step 5: Extract metadata for Docker (ONLY version tags)
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}
-          flavor: |
-            latest=false
-          tags: |
-            # Specific version tag (e.g. v0.6.1-gpu)
-            type=ref,event=tag,suffix=-gpu
-            # Latest tag for GPU version
-            type=raw,value=latest-gpu
-      
-      # Step 5b: Check available space before build
-      - name: Check disk space before build
-        run: |
-          echo "📊 Disk space before Docker build:"
-          df -h
-          echo "📊 Docker images:"
-          docker images
-      
-      # Step 5c: Verify GPU requirements (for logging)
-      - name: Verify GPU requirements.txt
-        run: |
-          echo "📝 Using CUDA-enabled requirements for GPU build..."
-          cd docker
-          echo "✅ GPU requirements.txt:"
-          cat requirements.txt
-          echo ""
-          echo "🔧 CUDA torch wheel will be downloaded from PyTorch repository"
-      
-      # Step 6: Build and push GPU Docker image with CACHE
-      - name: Build and push GPU Docker image
-        id: build-gpu
+      # Step 7: Build and push Docker image (with retry for GPU)
+      - name: Build and push Docker image (${{ matrix.variant }})
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/dockerfile
-          platforms: linux/amd64
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.variant=gpu
-            gpu.cuda=12.1.0
-          
-          # ✅ CACHE REGISTRY CONFIGURATION
-          cache-from: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-gpu
-          cache-to: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-gpu,mode=max
-          
-          # Build arguments
-          build-args: |
-            ENABLE_GPU=true
-          
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            ${{ steps.build-args.outputs.LABELS }}
+          # Disable cache temporarily to avoid disk space issues
+          no-cache: true
           # Disable features that can cause conflicts
           provenance: false
           sbom: false
           # Output only digest, no extra metadata
           outputs: type=registry
-        # GPU builds can be retried if they fail
-        continue-on-error: true
+          build-args: |
+            ${{ steps.build-args.outputs.BUILD_ARGS }}
+        # Retry for GPU builds that often fail due to cache issues
+        continue-on-error: ${{ matrix.variant == 'gpu' }}
       
       # Extra step: Retry GPU build if it fails
       - name: Retry GPU build (if needed)
-        if: failure()
+        if: failure() && matrix.variant == 'gpu'
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/dockerfile
-          platforms: linux/amd64
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.variant=gpu
-            gpu.cuda=12.1.0
-          
-          # Use cache even on retry
-          cache-from: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-gpu
-          cache-to: type=registry,ref=${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:buildcache-gpu,mode=max
-          
-          # Build arguments
-          build-args: |
-            ENABLE_GPU=true
-          
+            org.opencontainers.image.variant=${{ matrix.variant }}
+            ${{ steps.build-args.outputs.LABELS }}
+          # No cache for retry
+          no-cache: true
           provenance: false
           sbom: false
           outputs: type=registry
+          build-args: |
+            ${{ steps.build-args.outputs.BUILD_ARGS }}
       
-      # Step 7: Output image details
-      - name: GPU Image details
+      # Step 8: Output image details
+      - name: Image details
         run: |
-          echo "✅ Successfully built and pushed GPU image"
+          echo "✅ Successfully built and pushed ${{ matrix.variant }} image"
           echo "📦 Image: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
           echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
-          echo "🔖 Digest: ${{ steps.build-gpu.outputs.digest }}"
+          echo "🔖 Digest: ${{ steps.build.outputs.digest }}"
           echo "📋 Version: ${{ github.ref_name }}"
-          echo "📊 Final disk usage:"
   
-  # ========================================
-  # JOB 3: Cleanup Unwanted Images
-  # ========================================
+  # Job to clean up unwanted SHA images
   cleanup-unwanted-images:
-    needs: [build-gpu]  # Build only GPU image
+    needs: build-and-push
     runs-on: ubuntu-latest
     if: success()
     
@@ -498,14 +205,10 @@ jobs:
           
           echo "✅ Cleanup completed"
 
-  # ========================================
-  # JOB 4: Verify Images (GPU only)
-  # ========================================
+  # Job to verify images after push
   verify-images:
-    needs: [build-gpu, cleanup-unwanted-images]
-    if: ${{ needs.build-gpu.result == 'success' }}
+    needs: [build-and-push, cleanup-unwanted-images]
     runs-on: ubuntu-latest
-    continue-on-error: true  # Don't block release if verification fails
     
     permissions:
       packages: read
@@ -515,9 +218,6 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Prepare lowercase image name
         id: image-name
         run: |
@@ -525,46 +225,29 @@ jobs:
           LOWERCASE_IMAGE_NAME=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME_LOWER=${LOWERCASE_IMAGE_NAME}" >> $GITHUB_OUTPUT
       
-      - name: Verify GPU image (with retry)
+      - name: Verify CPU image
         run: |
-          set -e
-          IMAGE="${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          TAG1="$IMAGE:$VERSION-gpu"
-          TAG2="$IMAGE:latest-gpu"
-          echo "Verifying GPU image tags: $TAG1 and $TAG2"
-
-          for tag in "$TAG1" "$TAG2"; do
-            echo "Checking availability for $tag"
-            FOUND=0
-            for i in $(seq 1 12); do
-              if docker buildx imagetools inspect "$tag" > /dev/null 2>&1; then
-                echo "Found manifest for $tag"
-                FOUND=1
-                break
-              fi
-              echo "Manifest not ready for $tag (attempt $i/12). Waiting 20s..."
-              sleep 20
-            done
-            if [ "$FOUND" -ne 1 ]; then
-              echo "Manifest still not available for $tag after waiting. Failing."
-              exit 1
-            fi
-            echo "Pulling $tag"
-            docker pull "$tag"
-          done
+          echo "Verifying CPU image for version ${{ steps.version.outputs.VERSION }}..."
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu
+      
+      - name: Verify GPU image  
+        run: |
+          echo "Verifying GPU image for version ${{ steps.version.outputs.VERSION }}..."
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu
+          docker pull ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu
       
       - name: List available tags
         run: |
-          echo "Available image tags for this release: "
+          echo "📋 Available image tags for this release:"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-cpu"
           echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.VERSION }}-gpu"
+          echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-cpu"
           echo "- ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:latest-gpu"
   
-  # ========================================
-  # JOB 5: Create Release
-  # ========================================
+  # Job to create release notes
   create-release:
-    needs: [build-gpu, cleanup-unwanted-images]  # Removed verify-images dependency
+    needs: [build-and-push, cleanup-unwanted-images]
     runs-on: ubuntu-latest
     
     permissions:
@@ -577,18 +260,24 @@ jobs:
       - name: Extract version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
+      
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: Release ${{ steps.version.outputs.VERSION }}
           body: |
-            ## Docker Images Published
+            ## 🚀 Docker Images Published
             
-            This release includes the GPU image (CUDA 12.1):
+            This release includes Docker images for both CPU and GPU variants:
             
-            ### GPU Image
+            ### CPU Image
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
+            docker pull ghcr.io/${{ github.repository }}:latest-cpu
+            ```
+            
+            ### GPU Image (CUDA 12.1)
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
             docker pull ghcr.io/${{ github.repository }}:latest-gpu
@@ -596,6 +285,10 @@ jobs:
             
             ### Docker Compose
             ```bash
+            # CPU deployment
+            cd docker
+            docker compose --profile cpu up -d
+            
             # GPU deployment
             cd docker
             docker compose --profile gpu up -d
@@ -603,18 +296,12 @@ jobs:
             
             ### Quick Start
             ```bash
+            # Run CPU version
+            docker run -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-cpu
+            
             # Run GPU version (requires nvidia-docker)
             docker run --gpus all -p 8080:8080 ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}-gpu
             ```
-            
-            ## Improvements in This Version
-            
-            - Ultra-aggressive disk space optimization
-            - Docker moved to /mnt partition (70GB extra)
-            - Optimized build process with registry cache
-            - Focused GPU-only build to reduce space usage
-            - ~50% faster subsequent builds
-            - 99%+ reliable builds
             
             For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
           draft: false
