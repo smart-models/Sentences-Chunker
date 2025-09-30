@@ -7,7 +7,6 @@ import torch
 import math
 import pickle
 from pathlib import Path
-from enum import Enum
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
@@ -15,27 +14,14 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
 
-# Define supported SaT models
-class SaTModelName(str, Enum):
-    # 1-layer models
-    sat_1l = "sat-1l"
-    sat_1l_sm = "sat-1l-sm"
-
-    # 3-layer models (good for speed-sensitive applications)
-    sat_3l = "sat-3l"
-    sat_3l_sm = "sat-3l-sm"
-
-    # 6-layer models
-    sat_6l = "sat-6l"
-    sat_6l_sm = "sat-6l-sm"
-
-    # 9-layer model
-    sat_9l = "sat-9l"
-
-    # 12-layer models (best performance)
-    sat_12l = "sat-12l"
-    sat_12l_sm = "sat-12l-sm"  # Default model in original code
-
+# Valid SaT model names
+VALID_SAT_MODELS = {
+    "sat-1l", "sat-1l-sm",
+    "sat-3l", "sat-3l-sm",
+    "sat-6l", "sat-6l-sm",
+    "sat-9l",
+    "sat-12l", "sat-12l-sm"
+}
 
 # Configure logging
 logging.basicConfig(
@@ -44,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration Constants
-DEFAULT_SAT_MODEL_NAME = SaTModelName.sat_12l_sm
+DEFAULT_SAT_MODEL_NAME = "sat-12l-sm"
 DEFAULT_SAT_SPLIT_THRESHOLD = 0.5
 TIKTOKEN_ENCODING = "cl100k_base"
 CACHE_TIMEOUT = 3600  # Model cache timeout in seconds (1 hour)
@@ -104,7 +90,7 @@ class ChunkingMetadata(BaseModel):
     min_tokens_in_sentence: int = Field(
         ..., description="Minimum number of tokens in any single sentence."
     )
-    sat_model_name: SaTModelName = Field(
+    sat_model_name: str = Field(
         ..., description="Name of the SaT model used for splitting."
     )
     source: str = Field(..., description="Name of the processed file.")
@@ -138,7 +124,7 @@ class FileChunkingMetadata(BaseModel):
     avg_tokens_per_chunk: int = Field(..., description="Average tokens per chunk.")
     max_tokens_in_chunk: int = Field(..., description="Maximum tokens in any chunk.")
     min_tokens_in_chunk: int = Field(..., description="Minimum tokens in any chunk.")
-    sat_model_name: SaTModelName = Field(
+    sat_model_name: str = Field(
         ..., description="Name of the SaT model used for splitting."
     )
     split_threshold: float = Field(
@@ -148,9 +134,6 @@ class FileChunkingMetadata(BaseModel):
     processing_time: float = Field(
         ..., description="Total time taken for processing in seconds."
     )
-
-    class Config:
-        use_enum_values = True
 
 
 class ChunkingResult(BaseModel):
@@ -173,7 +156,7 @@ class FileChunkingResult(BaseModel):
 
 class SplitSentencesInput(BaseModel):
     """Input parameters for split sentences endpoint."""
-    model_name: SaTModelName = Field(
+    model_name: str = Field(
         default=DEFAULT_SAT_MODEL_NAME,
         description="The SaT model to use for sentence segmentation"
     )
@@ -187,7 +170,7 @@ class SplitSentencesInput(BaseModel):
 
 class FileChunkerInput(BaseModel):
     """Input parameters for file chunking endpoint."""
-    model_name: SaTModelName = Field(
+    model_name: str = Field(
         default=DEFAULT_SAT_MODEL_NAME,
         description="The SaT model to use for sentence segmentation"
     )
@@ -232,7 +215,7 @@ async def lifespan(app: FastAPI):
     # Initialize the SaT model during startup
     try:
         logger.info(
-            f"Loading WTPSplit model {DEFAULT_SAT_MODEL_NAME.value} during application startup..."
+            f"Loading WTPSplit model {DEFAULT_SAT_MODEL_NAME} during application startup..."
         )
         _get_sat_model(DEFAULT_SAT_MODEL_NAME)
         logger.info("WTPSplit model loaded successfully.")
@@ -274,11 +257,11 @@ app = FastAPI(
 )
 
 
-def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
+def _get_sat_model(model_name: str = DEFAULT_SAT_MODEL_NAME):
     """Get or initialize the SaT model with persistent disk caching.
 
     Args:
-        model_name (SaTModelName): Name of the SaT model to use
+        model_name (str): Name of the SaT model to use
 
     Returns:
         SaT: The initialized SaT model instance.
@@ -288,7 +271,7 @@ def _get_sat_model(model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME):
         RuntimeError: If there's an error initializing the model
     """
     current_time = time.time()
-    model_key = model_name.value  # Using the model name as the cache key
+    model_key = model_name  # Using the model name as the cache key
 
     with _model_lock:
         # Check for expired models first
@@ -392,7 +375,7 @@ def preprocess_text(text):
 
 def split_sentences_NLP(
     doc: str,
-    model_name: SaTModelName = DEFAULT_SAT_MODEL_NAME,
+    model_name: str = DEFAULT_SAT_MODEL_NAME,
     split_threshold: float = DEFAULT_SAT_SPLIT_THRESHOLD,
 ) -> List[str]:
     """Split a document into sentences using WTPSplit's advanced sentence segmentation.
@@ -403,7 +386,7 @@ def split_sentences_NLP(
 
     Args:
         doc (str): The input document text to be split into sentences.
-        model_name (SaTModelName): Name of the SaT model to use
+        model_name (str): Name of the SaT model to use
         split_threshold (float): Threshold value for sentence splitting (0.0-1.0)
 
     Returns:
@@ -914,7 +897,7 @@ async def health_check():
         "status": "healthy",
         "version": app.version,
         "gpu_available": torch.cuda.is_available(),
-        "default_model": DEFAULT_SAT_MODEL_NAME.value,
+        "default_model": DEFAULT_SAT_MODEL_NAME,
     }
 
 
@@ -935,6 +918,13 @@ async def split_sentences_endpoint(
         ChunkingResult: List of sentences as chunks with metadata
     """
     start_time = time.time()
+
+    # Validate model_name
+    if input_data.model_name not in VALID_SAT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}"
+        )
 
     # Validate file type
     if not file.filename.lower().endswith((".txt", ".md")):
@@ -1032,8 +1022,16 @@ async def file_chunker_endpoint(
         HTTPException (500): For unexpected server errors
     """
     start_time = time.time()
+    
+    # Validate model_name
+    if input_data.model_name not in VALID_SAT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model_name: '{input_data.model_name}'. Valid options: {sorted(VALID_SAT_MODELS)}"
+        )
+    
     logger.info(
-        f"Processing file {file.filename} with model={input_data.model_name.value}, "
+        f"Processing file {file.filename} with model={input_data.model_name}, "
         f"threshold={input_data.split_threshold}, max_tokens={input_data.max_chunk_tokens}, "
         f"overlap={input_data.overlap_sentences}, strict_mode={input_data.strict_mode}"
     )
